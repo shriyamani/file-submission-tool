@@ -5,7 +5,8 @@ Beam is a secure file transfer web-browser tool that allows individuals to share
 TODO
 
 ## Usage Instructions
-TODO
+To run the tool in your browser:<br>
+``` npm run dev```
 
 ## Contributors
 Janice Wong, Shriya Mani, Nicole Ineza, Jasper Shen<br>
