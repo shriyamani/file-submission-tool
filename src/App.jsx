@@ -2,9 +2,17 @@ import { useState } from 'react'
 import reactLogo from './assets/react.svg'
 import viteLogo from '/vite.svg'
 import './App.css'
+import { generateECDHKeyPair } from './utils/crypto'
 
 function App() {
   const [count, setCount] = useState(0)
+  const [keysGenerated, setKeysGenerated] = useState(false)
+
+  const handleGenerateKeys = async () => {
+    const keys = await generateECDHKeyPair()
+    console.log('Generated Keys:', keys)
+    setKeysGenerated(true)
+  }
 
   return (
     <>
@@ -16,7 +24,12 @@ function App() {
           <img src={reactLogo} className="logo react" alt="React logo" />
         </a>
       </div>
-      <h1>Vite + React</h1>
+      <h1>File Submission Tool</h1>
+      <div className="card">
+        <button onClick={handleGenerateKeys}>
+          {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
+        </button>
+      </div>
       <div className="card">
         <button onClick={() => setCount((count) => count + 1)}>
           count is {count}
