@@ -1,3 +1,5 @@
+import {Peer, DataConnection} from 'peerjs'
+
 import {
   type ProgressCallback,
   type ReceivedFile,
@@ -5,49 +7,41 @@ import {
   type TransferConnection,
 } from './transferTypes'
 
-interface MockSession {
-  receiverConnected: boolean
-  pendingFile?: File
+/*
+  Represents elements of an active session
+  - peer, connected or not?, sending or receiving?
+  - (optional) receiver approving incoming connection?,
+    the file being sent, the chunks of file
+*/
+interface ActiveSession {
+  peer: Peer, 
+  connection: DataConnection | null, 
+  role: 'sender' | 'receiver', 
+  onApprovalRequest?: (approve: boolean) => void, 
+  pendingFile?: File,
+  fileChunks?: ArrayBuffer[]
 }
 
-const mockSessions = new Map<string, MockSession>()
+const activeSessions = new Map<string, ActiveSession>()
 
-const delay = (ms: number): Promise<void> => {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms)
-  })
-}
-
-const ensureSession = (sessionId: string): MockSession => {
-  const existing = mockSessions.get(sessionId)
-  if (existing) {
-    return existing
-  }
-
-  const session: MockSession = { receiverConnected: false }
-  mockSessions.set(sessionId, session)
-  return session
-}
-
+/*
+  Generate random session IDs using WebCryptoAPI
+*/
 const createRandomId = (): string => {
-  const value = Math.floor(Math.random() * 10 ** 8)
-  return `beam-${value.toString(36)}`
+  const uuid = self.crypto.randomUUID();
+  return `beam-${uuid}`
 }
 
-const emitProgress = async (onProgress: ProgressCallback, durationMs: number): Promise<void> => {
-  const steps = 20
-  onProgress(0)
-
-  for (let step = 1; step <= steps; step += 1) {
-    await delay(durationMs / steps)
-    onProgress(Math.round((step / steps) * 100))
-  }
-}
-
+/*
+  Called when the sender clicks "Generate Link"
+  Creates a PeerJS peer and returns the session info
+  (PeerJS uses Google's public STUN servers by default)
+*/
 export const createSession = (): SessionInfo => {
   const sessionId = createRandomId()
-  const session = ensureSession(sessionId)
-  session.receiverConnected = false
+  const peer = new Peer(sessionId)
+
+  activeSessions.set(sessionId, {peer, connection: null, role: 'sender'})
 
   const shareUrl = `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}`
 
@@ -58,34 +52,78 @@ export const createSession = (): SessionInfo => {
   }
 }
 
+  /*
+    SENDER: waits for the receiver to connect with them
+  */
 export const waitForReceiver = async (sessionId: string): Promise<TransferConnection> => {
-  const session = ensureSession(sessionId)
-
-  // TODO: Replace with PeerJS/WebRTC host signaling + data-channel readiness checks.
-  await delay(1400)
-  session.receiverConnected = true
-
-  return {
-    id: `sender-${sessionId}`,
-    sessionId,
-    role: 'sender',
-    connected: true,
+  const session = activeSessions.get(sessionId)
+  if(!session || session.role !== 'sender') {
+    throw new Error('Sender session is invalid.')
   }
+
+  //wait asynchronously for receiver to connect.
+  return new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error("Connection timeout - receiver has not connected."))
+    }, 600);
+
+    (session.peer).on('connection', (conn: DataConnection) => {
+      //check if a receiver has already connected
+      if (session.connection) {
+         conn.on('open', () => {
+          conn.send({type: 'rejection', reason: 'existing_connection'})
+          conn.close()
+         })
+        return
+      }
+
+      const approval = window.confirm("New connection request. Approve?")
+
+      if (!approval) {
+        conn.on('open', () => {
+          conn.send({type: 'rejection', reason: 'denied approval'})
+          conn.close()
+        })
+        clearTimeout(timeout)
+        reject(new Error("Connection denied"))
+        return
+      }
+
+      conn.on('open', () => {
+        clearTimeout(timeout)
+        session.connection = conn
+        resolve ({
+          id: conn.peer,
+          sessionId,
+          role: 'sender',
+          connected: true,
+        })
+      });
+
+      conn.on('error', () => {
+        clearTimeout(timeout)
+        reject(new Error("Error connecting."))
+      });
+
+      (session.peer).on('error', () => {
+        clearTimeout(timeout)
+        reject(new Error("Error with peer."))
+      })
+
+    })
+  })
 }
 
+/*
+  RECEIVER: attempts to connect with the sender to receive the file
+*/
 export const connectAsReceiver = async (sessionId: string): Promise<TransferConnection> => {
-  const session = ensureSession(sessionId)
+  const peer = new Peer()
 
-  // TODO: Replace with PeerJS/WebRTC connection to sender by sessionId.
-  await delay(900)
-  session.receiverConnected = true
+  return new Promise((resolve, reject) => {
+    peer.
+  })
 
-  return {
-    id: `receiver-${sessionId}`,
-    sessionId,
-    role: 'receiver',
-    connected: true,
-  }
 }
 
 export const sendFile = async (
