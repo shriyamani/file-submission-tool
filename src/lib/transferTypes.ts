@@ -15,6 +15,12 @@ export interface TransferConnection {
   connected: boolean
 }
 
+export interface ReceiverApprovalRequest {
+  requestId: string
+  receiverLabel: string
+  requestedAt: number
+}
+
 export interface ReceivedFile {
   name: string
   size: number

@@ -4,6 +4,9 @@ import SenderView from './views/SenderView'
 import './App.css'
 
 type InfoPage = 'transfer' | 'how' | 'security' | 'faq'
+type Theme = 'light' | 'dark'
+
+const THEME_STORAGE_KEY = 'beam-theme'
 
 const readSessionIdFromLocation = (): string | null => {
   const url = new URL(window.location.href)
@@ -28,11 +31,31 @@ const readSessionIdFromLocation = (): string | null => {
   return decodeURIComponent(hashValue)
 }
 
+const readInitialTheme = (): Theme => {
+  try {
+    const storedValue = window.localStorage.getItem(THEME_STORAGE_KEY)
+    if (storedValue === 'light' || storedValue === 'dark') {
+      return storedValue
+    }
+  } catch {
+    // Ignore storage failures and fall back to system preference.
+  }
+
+  if (window.matchMedia('(prefers-color-scheme: dark)').matches) {
+    return 'dark'
+  }
+
+  return 'light'
+}
+
 const App = () => {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     return readSessionIdFromLocation()
   })
   const [activePage, setActivePage] = useState<InfoPage>('transfer')
+  const [theme, setTheme] = useState<Theme>(() => {
+    return readInitialTheme()
+  })
 
   useEffect(() => {
     const syncFromUrl = (): void => {
@@ -48,6 +71,16 @@ const App = () => {
     }
   }, [])
 
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme)
+
+    try {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch {
+      // Ignore storage failures (for example, strict privacy mode).
+    }
+  }, [theme])
+
   return (
     <div className="beam-shell">
       <main className="beam-layout">
@@ -57,6 +90,15 @@ const App = () => {
 
           <header className="beam-topbar">
             <nav className="beam-nav" aria-label="Primary">
+              <button
+                className={`beam-tab${activePage === 'transfer' ? ' beam-tab--active' : ''}`}
+                type="button"
+                onClick={() => {
+                  setActivePage('transfer')
+                }}
+              >
+                Transfer
+              </button>
               <button
                 className={`beam-tab${activePage === 'how' ? ' beam-tab--active' : ''}`}
                 type="button"
@@ -84,17 +126,26 @@ const App = () => {
               >
                 FAQ
               </button>
+            </nav>
+            <div className="topbar-right">
               <button
-                className={`beam-tab${activePage === 'transfer' ? ' beam-tab--active' : ''}`}
+                className={`theme-slider${theme === 'dark' ? ' theme-slider--dark' : ''}`}
                 type="button"
+                role="switch"
+                aria-checked={theme === 'dark'}
+                aria-label="Toggle dark mode"
                 onClick={() => {
-                  setActivePage('transfer')
+                  setTheme((currentTheme) => {
+                    return currentTheme === 'light' ? 'dark' : 'light'
+                  })
                 }}
               >
-                Transfer
+                <span className="theme-slider__label theme-slider__label--light">Light</span>
+                <span className="theme-slider__label theme-slider__label--dark">Dark</span>
+                <span className="theme-slider__thumb" aria-hidden />
               </button>
-            </nav>
-            <div className="mode-badge">{sessionId ? 'Receiver mode' : 'Sender mode'}</div>
+              <div className="mode-badge">{sessionId ? 'Receiver mode' : 'Sender mode'}</div>
+            </div>
           </header>
 
           <div className="beam-hero">

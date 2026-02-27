@@ -1,8 +1,14 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import ConfettiBurst from '../components/ConfettiBurst'
 import ProgressBar from '../components/ProgressBar'
 import StatusPill from '../components/StatusPill'
-import { connectAsReceiver, receiveFile } from '../lib/mockTransfer'
-import { type ReceivedFile, type TransferConnection, type TransferStatus } from '../lib/transferTypes'
+import { receiveFile, requestReceiverConnection, waitForSenderApproval } from '../lib/mockTransfer'
+import {
+  type ReceivedFile,
+  type ReceiverApprovalRequest,
+  type TransferConnection,
+  type TransferStatus,
+} from '../lib/transferTypes'
 
 interface ReceiverViewProps {
   sessionId: string
@@ -27,11 +33,53 @@ const formatBytes = (bytes: number): string => {
 
 const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   const [connection, setConnection] = useState<TransferConnection | null>(null)
+  const [pendingRequest, setPendingRequest] = useState<ReceiverApprovalRequest | null>(null)
   const [status, setStatus] = useState<TransferStatus>('idle')
   const [progress, setProgress] = useState(0)
   const [receivedFile, setReceivedFile] = useState<ReceivedFile | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState('')
+  const [showConfetti, setShowConfetti] = useState(false)
+
+  const stageProgress = useMemo(() => {
+    if (status === 'done') {
+      return 100
+    }
+
+    if (status === 'transferring') {
+      return progress
+    }
+
+    if (status === 'connected') {
+      return 68
+    }
+
+    if (status === 'waiting') {
+      return 34
+    }
+
+    return 0
+  }, [progress, status])
+
+  const stageLabel = useMemo(() => {
+    if (status === 'done') {
+      return 'Download complete'
+    }
+
+    if (status === 'transferring') {
+      return 'Download progress'
+    }
+
+    if (status === 'connected') {
+      return 'Sender approved. Ready to receive'
+    }
+
+    if (status === 'waiting') {
+      return 'Waiting for sender approval'
+    }
+
+    return 'Press Connect to request access'
+  }, [status])
 
   useEffect(() => {
     if (!receivedFile) {
@@ -47,18 +95,52 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     }
   }, [receivedFile])
 
+  useEffect(() => {
+    if (status !== 'done') {
+      return
+    }
+
+    setShowConfetti(true)
+    const timerId = window.setTimeout(() => {
+      setShowConfetti(false)
+    }, 3000)
+
+    return () => {
+      window.clearTimeout(timerId)
+    }
+  }, [status])
+
   const handleConnect = async (): Promise<void> => {
     setErrorMessage('')
     setProgress(0)
+    setReceivedFile(null)
+    setConnection(null)
+    setPendingRequest(null)
     setStatus('waiting')
 
     try {
-      // TODO: Replace with actual PeerJS/WebRTC receiver join flow.
-      const receiverConnection = await connectAsReceiver(sessionId)
+      const request = await requestReceiverConnection(sessionId)
+      setPendingRequest(request)
+
+      // TODO: Replace with actual PeerJS/WebRTC receiver join flow + sender auth.
+      const receiverConnection = await waitForSenderApproval(sessionId, request.requestId)
       setConnection(receiverConnection)
+      setPendingRequest(null)
       setStatus('connected')
-    } catch {
+    } catch (error) {
       setStatus('error')
+      setPendingRequest(null)
+
+      if (error instanceof Error && error.message.toLowerCase().includes('rejected')) {
+        setErrorMessage('Sender rejected your connection request. Ask them to approve and try again.')
+        return
+      }
+
+      if (error instanceof Error && error.message.toLowerCase().includes('timed out')) {
+        setErrorMessage('Sender did not approve in time. Press Connect and try again.')
+        return
+      }
+
       setErrorMessage('Could not connect to sender. Verify the session link and retry.')
     }
   }
@@ -79,14 +161,22 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
       setReceivedFile(file)
       setStatus('done')
-    } catch {
+    } catch (error) {
       setStatus('error')
+
+      if (error instanceof Error && error.message.toLowerCase().includes('timed out waiting for sender file')) {
+        setErrorMessage('Sender has not sent the file yet. Ask sender to press Send, then press Receive file again.')
+        return
+      }
+
       setErrorMessage('Failed to receive the file. Reconnect and try again.')
     }
   }
 
   return (
     <section className="beam-card">
+      <ConfettiBurst active={showConfetti} />
+
       <header className="card-header">
         <div>
           <h2>Receiver</h2>
@@ -107,7 +197,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
           onClick={handleConnect}
           disabled={status === 'waiting' || status === 'transferring'}
         >
-          {connection ? 'Reconnect' : 'Connect'}
+          {status === 'waiting' ? 'Waiting for approval...' : connection ? 'Reconnect' : 'Connect'}
         </button>
         <button
           className="btn btn-secondary"
@@ -119,9 +209,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
         </button>
       </div>
 
-      {(status === 'transferring' || status === 'done') && (
-        <ProgressBar value={progress} label="Download progress" />
-      )}
+      <ProgressBar value={stageProgress} label={stageLabel} />
 
       {receivedFile && downloadUrl && (
         <div className="download-box">
@@ -135,7 +223,12 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
         </div>
       )}
 
-      {status === 'waiting' && <p className="message">Attempting connection...</p>}
+      {status === 'waiting' && pendingRequest && (
+        <p className="message">
+          Request sent as <strong>{pendingRequest.receiverLabel}</strong>. Waiting for sender approval...
+        </p>
+      )}
+      {status === 'waiting' && !pendingRequest && <p className="message">Attempting connection...</p>}
       {status === 'connected' && <p className="message message--success">Connected. Press Receive file.</p>}
       {errorMessage && <p className="message message--error">{errorMessage}</p>}
     </section>

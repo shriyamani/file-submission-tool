@@ -1,16 +1,44 @@
 import {
   type ProgressCallback,
   type ReceivedFile,
+  type ReceiverApprovalRequest,
   type SessionInfo,
   type TransferConnection,
 } from './transferTypes'
 
+type RequestState = 'pending' | 'approved' | 'rejected'
+
+interface PendingReceiverRequest extends ReceiverApprovalRequest {
+  state: RequestState
+}
+
+interface SentFileMeta {
+  name: string
+  size: number
+  type: string
+  sentAt: number
+}
+
 interface MockSession {
   receiverConnected: boolean
   pendingFile?: File
+  pendingFileMeta: SentFileMeta | null
+  receiverRequest: PendingReceiverRequest | null
+  transferCompleted: boolean
+}
+
+interface FileAvailabilityResult {
+  file?: File
+  meta?: SentFileMeta
 }
 
 const mockSessions = new Map<string, MockSession>()
+
+const REQUEST_POLL_INTERVAL_MS = 220
+const REQUEST_APPROVAL_TIMEOUT_MS = 90_000
+const FILE_POLL_INTERVAL_MS = 280
+const FILE_AVAILABILITY_TIMEOUT_MS = 60_000
+const STORAGE_KEY_PREFIX = 'beam-mock-session:'
 
 const delay = (ms: number): Promise<void> => {
   return new Promise((resolve) => {
@@ -24,14 +52,144 @@ const ensureSession = (sessionId: string): MockSession => {
     return existing
   }
 
-  const session: MockSession = { receiverConnected: false }
+  const session: MockSession = {
+    receiverConnected: false,
+    pendingFileMeta: null,
+    receiverRequest: null,
+    transferCompleted: false,
+  }
   mockSessions.set(sessionId, session)
   return session
+}
+
+const getStorageKey = (sessionId: string): string => {
+  return `${STORAGE_KEY_PREFIX}${sessionId}`
 }
 
 const createRandomId = (): string => {
   const value = Math.floor(Math.random() * 10 ** 8)
   return `beam-${value.toString(36)}`
+}
+
+const createReceiverLabel = (): string => {
+  const value = Math.floor(1000 + Math.random() * 9000)
+  return `receiver-${value}`
+}
+
+const asPublicRequest = (request: PendingReceiverRequest): ReceiverApprovalRequest => {
+  return {
+    requestId: request.requestId,
+    receiverLabel: request.receiverLabel,
+    requestedAt: request.requestedAt,
+  }
+}
+
+const isValidRequestState = (state: unknown): state is RequestState => {
+  return state === 'pending' || state === 'approved' || state === 'rejected'
+}
+
+const isValidSentFileMeta = (meta: unknown): meta is SentFileMeta => {
+  if (!meta || typeof meta !== 'object') {
+    return false
+  }
+
+  const candidate = meta as {
+    name?: unknown
+    size?: unknown
+    type?: unknown
+    sentAt?: unknown
+  }
+
+  return (
+    typeof candidate.name === 'string' &&
+    typeof candidate.size === 'number' &&
+    typeof candidate.type === 'string' &&
+    typeof candidate.sentAt === 'number'
+  )
+}
+
+const hydrateSessionFromStorage = (sessionId: string, session: MockSession): void => {
+  try {
+    const raw = window.localStorage.getItem(getStorageKey(sessionId))
+    if (!raw) {
+      return
+    }
+
+    const parsed = JSON.parse(raw) as {
+      receiverConnected?: unknown
+      receiverRequest?: unknown
+      pendingFileMeta?: unknown
+      transferCompleted?: unknown
+    }
+
+    if (typeof parsed.receiverConnected === 'boolean') {
+      session.receiverConnected = parsed.receiverConnected
+    }
+
+    if (typeof parsed.transferCompleted === 'boolean') {
+      session.transferCompleted = parsed.transferCompleted
+    }
+
+    if (isValidSentFileMeta(parsed.pendingFileMeta)) {
+      session.pendingFileMeta = parsed.pendingFileMeta
+    } else {
+      session.pendingFileMeta = null
+    }
+
+    const maybeRequest = parsed.receiverRequest
+    if (!maybeRequest || typeof maybeRequest !== 'object') {
+      session.receiverRequest = null
+      return
+    }
+
+    const request = maybeRequest as {
+      requestId?: unknown
+      receiverLabel?: unknown
+      requestedAt?: unknown
+      state?: unknown
+    }
+
+    if (
+      typeof request.requestId === 'string' &&
+      typeof request.receiverLabel === 'string' &&
+      typeof request.requestedAt === 'number' &&
+      isValidRequestState(request.state)
+    ) {
+      session.receiverRequest = {
+        requestId: request.requestId,
+        receiverLabel: request.receiverLabel,
+        requestedAt: request.requestedAt,
+        state: request.state,
+      }
+      return
+    }
+
+    session.receiverRequest = null
+  } catch {
+    // Ignore malformed storage payloads and fall back to in-memory state.
+  }
+}
+
+const persistSessionToStorage = (sessionId: string, session: MockSession): void => {
+  try {
+    window.localStorage.setItem(
+      getStorageKey(sessionId),
+      JSON.stringify({
+        receiverConnected: session.receiverConnected,
+        receiverRequest: session.receiverRequest,
+        pendingFileMeta: session.pendingFileMeta,
+        transferCompleted: session.transferCompleted,
+      }),
+    )
+  } catch {
+    // Ignore storage write failures (for example in strict privacy mode).
+  }
+}
+
+const getSession = (sessionId: string): MockSession => {
+  const session = ensureSession(sessionId)
+  hydrateSessionFromStorage(sessionId, session)
+  return session
 }
 
 const emitProgress = async (onProgress: ProgressCallback, durationMs: number): Promise<void> => {
@@ -44,10 +202,46 @@ const emitProgress = async (onProgress: ProgressCallback, durationMs: number): P
   }
 }
 
+const waitForFileAvailability = async (
+  sessionId: string,
+  timeoutMs: number,
+  onProgress?: ProgressCallback,
+): Promise<FileAvailabilityResult | null> => {
+  const session = getSession(sessionId)
+  const timeoutAt = Date.now() + timeoutMs
+  let waitingProgress = 2
+
+  while (Date.now() < timeoutAt) {
+    hydrateSessionFromStorage(sessionId, session)
+
+    if (session.pendingFile) {
+      return { file: session.pendingFile }
+    }
+
+    if (session.pendingFileMeta) {
+      return { meta: session.pendingFileMeta }
+    }
+
+    if (onProgress) {
+      waitingProgress = Math.min(waitingProgress + 1, 24)
+      onProgress(waitingProgress)
+    }
+
+    await delay(FILE_POLL_INTERVAL_MS)
+  }
+
+  return null
+}
+
 export const createSession = (): SessionInfo => {
   const sessionId = createRandomId()
   const session = ensureSession(sessionId)
   session.receiverConnected = false
+  session.pendingFile = undefined
+  session.pendingFileMeta = null
+  session.receiverRequest = null
+  session.transferCompleted = false
+  persistSessionToStorage(sessionId, session)
 
   const shareUrl = `${window.location.origin}${window.location.pathname}?session=${encodeURIComponent(sessionId)}`
 
@@ -58,34 +252,164 @@ export const createSession = (): SessionInfo => {
   }
 }
 
-export const waitForReceiver = async (sessionId: string): Promise<TransferConnection> => {
-  const session = ensureSession(sessionId)
+export const isTransferCompleted = (sessionId: string): boolean => {
+  const session = getSession(sessionId)
+  return session.transferCompleted
+}
 
-  // TODO: Replace with PeerJS/WebRTC host signaling + data-channel readiness checks.
-  await delay(1400)
-  session.receiverConnected = true
+export const getPendingReceiverRequest = (sessionId: string): ReceiverApprovalRequest | null => {
+  const session = getSession(sessionId)
+  const request = session.receiverRequest
 
-  return {
+  if (!request || request.state !== 'pending') {
+    return null
+  }
+
+  return asPublicRequest(request)
+}
+
+export const requestReceiverConnection = async (sessionId: string): Promise<ReceiverApprovalRequest> => {
+  const session = getSession(sessionId)
+
+  await delay(420)
+
+  const request: PendingReceiverRequest = {
+    requestId: createRandomId(),
+    receiverLabel: createReceiverLabel(),
+    requestedAt: Date.now(),
+    state: 'pending',
+  }
+
+  session.receiverConnected = false
+  session.receiverRequest = request
+  persistSessionToStorage(sessionId, session)
+
+  return asPublicRequest(request)
+}
+
+export const approveReceiverRequest = async (
+  sessionId: string,
+  requestId: string,
+): Promise<TransferConnection> => {
+  const session = getSession(sessionId)
+  const request = session.receiverRequest
+
+  const connectedResponse: TransferConnection = {
     id: `sender-${sessionId}`,
     sessionId,
     role: 'sender',
     connected: true,
   }
+
+  if (!request) {
+    if (session.receiverConnected) {
+      return connectedResponse
+    }
+
+    throw new Error('No pending receiver request to approve.')
+  }
+
+  if (request.requestId !== requestId && request.state !== 'pending') {
+    throw new Error('Receiver request is stale.')
+  }
+
+  if (request.state === 'approved') {
+    session.receiverConnected = true
+    session.receiverRequest = null
+    persistSessionToStorage(sessionId, session)
+    return connectedResponse
+  }
+
+  if (request.state !== 'pending') {
+    throw new Error('Receiver request is no longer pending.')
+  }
+
+  await delay(320)
+  request.state = 'approved'
+  session.receiverConnected = true
+  // Consume the request immediately on sender side to prevent duplicate popups.
+  session.receiverRequest = null
+  persistSessionToStorage(sessionId, session)
+
+  return connectedResponse
 }
 
-export const connectAsReceiver = async (sessionId: string): Promise<TransferConnection> => {
-  const session = ensureSession(sessionId)
+export const rejectReceiverRequest = async (sessionId: string, requestId: string): Promise<void> => {
+  const session = getSession(sessionId)
+  const request = session.receiverRequest
 
-  // TODO: Replace with PeerJS/WebRTC connection to sender by sessionId.
-  await delay(900)
-  session.receiverConnected = true
+  if (!request) {
+    return
+  }
 
-  return {
+  if (request.requestId !== requestId && request.state !== 'pending') {
+    throw new Error('Receiver request is stale.')
+  }
+
+  if (request.state !== 'pending') {
+    session.receiverRequest = null
+    session.receiverConnected = false
+    persistSessionToStorage(sessionId, session)
+    return
+  }
+
+  await delay(220)
+  request.state = 'rejected'
+  session.receiverConnected = false
+  persistSessionToStorage(sessionId, session)
+}
+
+export const waitForSenderApproval = async (
+  sessionId: string,
+  requestId: string,
+): Promise<TransferConnection> => {
+  const session = getSession(sessionId)
+  const timeoutAt = Date.now() + REQUEST_APPROVAL_TIMEOUT_MS
+
+  const receiverConnection: TransferConnection = {
     id: `receiver-${sessionId}`,
     sessionId,
     role: 'receiver',
     connected: true,
   }
+
+  while (Date.now() < timeoutAt) {
+    hydrateSessionFromStorage(sessionId, session)
+    const request = session.receiverRequest
+
+    if (!request || request.requestId !== requestId) {
+      if (session.receiverConnected) {
+        return receiverConnection
+      }
+
+      await delay(REQUEST_POLL_INTERVAL_MS)
+      continue
+    }
+
+    if (request.state === 'approved') {
+      session.receiverConnected = true
+      session.receiverRequest = null
+      persistSessionToStorage(sessionId, session)
+      return receiverConnection
+    }
+
+    if (request.state === 'rejected') {
+      session.receiverConnected = false
+      session.receiverRequest = null
+      persistSessionToStorage(sessionId, session)
+      throw new Error('Sender rejected the receiver request.')
+    }
+
+    await delay(REQUEST_POLL_INTERVAL_MS)
+  }
+
+  if (session.receiverRequest?.requestId === requestId && session.receiverRequest.state === 'pending') {
+    session.receiverRequest = null
+  }
+
+  session.receiverConnected = false
+  persistSessionToStorage(sessionId, session)
+  throw new Error('Timed out waiting for sender approval.')
 }
 
 export const sendFile = async (
@@ -97,11 +421,25 @@ export const sendFile = async (
     throw new Error('Connection is not active.')
   }
 
-  const session = ensureSession(connection.sessionId)
+  const session = getSession(connection.sessionId)
+
+  if (!session.receiverConnected) {
+    throw new Error('Receiver is not connected yet.')
+  }
+
+  session.transferCompleted = false
+  session.pendingFile = file
+  session.pendingFileMeta = {
+    name: file.name,
+    size: file.size,
+    type: file.type || 'application/octet-stream',
+    sentAt: Date.now(),
+  }
+  persistSessionToStorage(connection.sessionId, session)
 
   // TODO: Replace with chunked PeerJS data-channel writes + optional Web Crypto encryption.
   await emitProgress(onProgress, 2200)
-  session.pendingFile = file
+  persistSessionToStorage(connection.sessionId, session)
 }
 
 export const receiveFile = async (
@@ -112,35 +450,52 @@ export const receiveFile = async (
     throw new Error('Connection is not active.')
   }
 
-  const session = ensureSession(connection.sessionId)
+  const session = getSession(connection.sessionId)
+
+  if (!session.receiverConnected) {
+    throw new Error('Sender approval is required before receiving.')
+  }
+
+  onProgress(2)
+  const availablePayload = await waitForFileAvailability(connection.sessionId, FILE_AVAILABILITY_TIMEOUT_MS, onProgress)
+  if (!availablePayload) {
+    throw new Error('Timed out waiting for sender file.')
+  }
 
   // TODO: Replace with streaming chunk reads and Web Crypto decryption.
   await emitProgress(onProgress, 2200)
 
-  if (session.pendingFile) {
-    const file = session.pendingFile
+  let output: ReceivedFile
 
-    return {
+  if (availablePayload.file) {
+    const file = availablePayload.file
+    output = {
       name: file.name,
       size: file.size,
       type: file.type || 'application/octet-stream',
       blob: file.slice(0, file.size, file.type || 'application/octet-stream'),
     }
+  } else {
+    const fileMeta = availablePayload.meta as SentFileMeta
+    const fallbackBlob = new Blob(
+      [
+        `Beam mock transfer copy.\nOriginal file: ${fileMeta.name}\nOriginal size: ${fileMeta.size} bytes\nThis mock copy is generated for cross-tab demo mode.`,
+      ],
+      { type: 'text/plain' },
+    )
+
+    output = {
+      name: fileMeta.name,
+      size: fallbackBlob.size,
+      type: fallbackBlob.type,
+      blob: fallbackBlob,
+    }
   }
 
-  const fallbackBlob = new Blob(
-    [
-      'Beam mock mode: no sender file is available in this browser context. Connect both flows in one session for a full stubbed demo.',
-    ],
-    { type: 'text/plain' },
-  )
+  session.transferCompleted = true
+  persistSessionToStorage(connection.sessionId, session)
 
-  return {
-    name: 'beam-demo.txt',
-    size: fallbackBlob.size,
-    type: fallbackBlob.type,
-    blob: fallbackBlob,
-  }
+  return output
 }
 
 export const deriveSessionKey = async (sessionId: string): Promise<CryptoKey | null> => {
