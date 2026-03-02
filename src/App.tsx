@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import ReceiverView from './views/ReceiverView'
 import SenderView from './views/SenderView'
+import { generateECDHKeyPair } from './utils/crypto'
 import './App.css'
 
 type InfoPage = 'transfer' | 'how' | 'security' | 'faq'
@@ -56,6 +57,13 @@ const App = () => {
   const [theme, setTheme] = useState<Theme>(() => {
     return readInitialTheme()
   })
+  const [keysGenerated, setKeysGenerated] = useState(false)
+
+  const handleGenerateKeys = async () => {
+    const keys = await generateECDHKeyPair()
+    console.log('Generated Keys:', keys)
+    setKeysGenerated(true)
+  }
 
   useEffect(() => {
     const syncFromUrl = (): void => {
@@ -159,6 +167,13 @@ const App = () => {
               <section className="beam-card beam-card--placeholder">
                 <h2>{activePage === 'how' ? 'How it works' : activePage === 'security' ? 'Security' : 'FAQ'}</h2>
                 <p>TO BE ADDED...</p>
+                {activePage === 'security' && (
+                  <div style={{ marginTop: '20px' }}>
+                    <button onClick={handleGenerateKeys} className="beam-tab beam-tab--active">
+                      {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
+                    </button>
+                  </div>
+                )}
               </section>
             )}
           </div>

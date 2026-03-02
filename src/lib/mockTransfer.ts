@@ -1,3 +1,5 @@
+import { encryptChunk as secureEncryptChunk, decryptChunk as secureDecryptChunk } from '../utils/crypto.js'
+
 import {
   type ProgressCallback,
   type ReceivedFile,
@@ -25,6 +27,8 @@ interface MockSession {
   pendingFileMeta: SentFileMeta | null
   receiverRequest: PendingReceiverRequest | null
   transferCompleted: boolean
+  encryptedChunks?: ArrayBuffer[]
+  dummyKey?: CryptoKey
 }
 
 interface FileAvailabilityResult {
@@ -57,6 +61,7 @@ const ensureSession = (sessionId: string): MockSession => {
     pendingFileMeta: null,
     receiverRequest: null,
     transferCompleted: false,
+    encryptedChunks: [],
   }
   mockSessions.set(sessionId, session)
   return session
@@ -166,7 +171,6 @@ const hydrateSessionFromStorage = (sessionId: string, session: MockSession): voi
 
     session.receiverRequest = null
   } catch {
-    // Ignore malformed storage payloads and fall back to in-memory state.
   }
 }
 
@@ -182,7 +186,6 @@ const persistSessionToStorage = (sessionId: string, session: MockSession): void 
       }),
     )
   } catch {
-    // Ignore storage write failures (for example in strict privacy mode).
   }
 }
 
@@ -327,7 +330,6 @@ export const approveReceiverRequest = async (
   await delay(320)
   request.state = 'approved'
   session.receiverConnected = true
-  // Consume the request immediately on sender side to prevent duplicate popups.
   session.receiverRequest = null
   persistSessionToStorage(sessionId, session)
 
@@ -437,8 +439,41 @@ export const sendFile = async (
   }
   persistSessionToStorage(connection.sessionId, session)
 
-  // TODO: Replace with chunked PeerJS data-channel writes + optional Web Crypto encryption.
-  await emitProgress(onProgress, 2200)
+  session.encryptedChunks = [];
+
+  // TODO [Shriya]: Mocking the session key here for now so my encryption 
+  // code runs. When you implement the WebRTC key exchange, you'll generate 
+  // this shared session key properly using `deriveSessionKey()` instead :)
+  const dummyKey = await window.crypto.subtle.generateKey(
+    { name: "AES-GCM", length: 256 },
+    true,
+    ["encrypt", "decrypt"]
+  ) as CryptoKey;
+  session.dummyKey = dummyKey;
+
+  const CHUNK_SIZE = 64 * 1024; // 64KB per chunk
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+  let offset = 0;
+  let chunkIndex = 0;
+
+  while (offset < file.size) {
+    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
+    const chunkBuffer = await chunkBlob.arrayBuffer();
+
+    // Encrypt the file chunk before we send it 
+    const encryptedBuffer = await encryptChunk(chunkBuffer, dummyKey);
+
+    // TODO [Shriya]: Instead of saving to this mock array, this is where you can send the `encryptedBuffer` over the network using your PeerJS connection
+    session.encryptedChunks.push(encryptedBuffer);
+
+    offset += CHUNK_SIZE;
+    chunkIndex++;
+    onProgress(Math.round((chunkIndex / totalChunks) * 100));
+
+    // Tiny delay to mock network speeds
+    await delay(10);
+  }
+
   persistSessionToStorage(connection.sessionId, session)
 }
 
@@ -462,20 +497,37 @@ export const receiveFile = async (
     throw new Error('Timed out waiting for sender file.')
   }
 
-  // TODO: Replace with streaming chunk reads and Web Crypto decryption.
-  await emitProgress(onProgress, 2200)
-
   let output: ReceivedFile
 
-  if (availablePayload.file) {
-    const file = availablePayload.file
+  // If the mock session contains our encrypted chunks 
+  if (session.encryptedChunks && session.encryptedChunks.length > 0 && session.dummyKey) {
+    const decryptedBlobs: Blob[] = [];
+    let chunkIndex = 0;
+    const totalChunks = session.encryptedChunks.length;
+
+    // TODO [Shriya]: For WebRTC, you will be listening for incoming chunks via `peer.on('data')` instead of looping over this mock array. As they arrive, you can feed them to my decrypt method
+    for (const encryptedBuffer of session.encryptedChunks) {
+      // Decrypt the chunk as it arrives from the network
+      const decryptedBuffer = await decryptChunk(encryptedBuffer, session.dummyKey);
+      decryptedBlobs.push(new Blob([decryptedBuffer]));
+
+      chunkIndex++;
+      onProgress(Math.round((chunkIndex / totalChunks) * 100));
+      await delay(10);
+    }
+
+    const fileMeta = availablePayload.meta || session.pendingFileMeta!;
+    const finalBlob = new Blob(decryptedBlobs, { type: fileMeta.type });
+
     output = {
-      name: file.name,
-      size: file.size,
-      type: file.type || 'application/octet-stream',
-      blob: file.slice(0, file.size, file.type || 'application/octet-stream'),
+      name: fileMeta.name,
+      size: finalBlob.size,
+      type: fileMeta.type,
+      blob: finalBlob,
     }
   } else {
+    // Cross-tab mock fallback (localStorage doesn't support ArrayBuffers that well)
+    await emitProgress(onProgress, 2200)
     const fileMeta = availablePayload.meta as SentFileMeta
     const fallbackBlob = new Blob(
       [
@@ -483,7 +535,6 @@ export const receiveFile = async (
       ],
       { type: 'text/plain' },
     )
-
     output = {
       name: fileMeta.name,
       size: fallbackBlob.size,
@@ -501,7 +552,7 @@ export const receiveFile = async (
 export const deriveSessionKey = async (sessionId: string): Promise<CryptoKey | null> => {
   void sessionId
 
-  // TODO: Use Web Crypto (ECDH/AES-GCM) to derive a per-session key.
+  // TODO: Use Web Crypto (ECDH/AES-GCM) to derive a per-session key
   return null
 }
 
@@ -509,18 +560,14 @@ export const encryptChunk = async (
   payload: ArrayBuffer,
   sessionKey: CryptoKey | null,
 ): Promise<ArrayBuffer> => {
-  void sessionKey
-
-  // TODO: Use SubtleCrypto.encrypt when real session keys are enabled.
-  return payload
+  if (!sessionKey) return payload
+  return await secureEncryptChunk(payload, sessionKey)
 }
 
 export const decryptChunk = async (
   payload: ArrayBuffer,
   sessionKey: CryptoKey | null,
 ): Promise<ArrayBuffer> => {
-  void sessionKey
-
-  // TODO: Use SubtleCrypto.decrypt when real session keys are enabled.
-  return payload
+  if (!sessionKey) return payload
+  return await secureDecryptChunk(payload, sessionKey)
 }

@@ -11,6 +11,7 @@ import {
   rejectReceiverRequest,
   sendFile,
 } from '../lib/mockTransfer'
+import { generateECDHKeyPair } from '../utils/crypto'
 import {
   type ReceiverApprovalRequest,
   type SessionInfo,
@@ -173,7 +174,7 @@ const SenderView = () => {
     }
   }, [session])
 
-  const handleCreateSession = (): void => {
+  const handleCreateSession = async (): Promise<void> => {
     setErrorMessage('')
     setNoticeMessage('')
     setProgress(0)
@@ -184,6 +185,13 @@ const SenderView = () => {
     setConnection(null)
     setPendingReceiver(null)
     setStatus('waiting')
+
+    try {
+      const generatedKeys = await generateECDHKeyPair()
+      console.log('Session secured! Generated keys for Sender:', generatedKeys)
+    } catch (err) {
+      console.error('Failed to generate keys for session', err)
+    }
   }
 
   const handleApproveReceiver = async (): Promise<void> => {

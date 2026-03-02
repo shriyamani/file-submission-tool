@@ -3,6 +3,7 @@ import ConfettiBurst from '../components/ConfettiBurst'
 import ProgressBar from '../components/ProgressBar'
 import StatusPill from '../components/StatusPill'
 import { receiveFile, requestReceiverConnection, waitForSenderApproval } from '../lib/mockTransfer'
+import { generateECDHKeyPair } from '../utils/crypto'
 import {
   type ReceivedFile,
   type ReceiverApprovalRequest,
@@ -127,6 +128,13 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
       setConnection(receiverConnection)
       setPendingRequest(null)
       setStatus('connected')
+
+      try {
+        const generatedKeys = await generateECDHKeyPair()
+        console.log('Receiver connected! Generated keys for Receiver:', generatedKeys)
+      } catch (err) {
+        console.error('Failed to generate keys for receiver', err)
+      }
     } catch (error) {
       setStatus('error')
       setPendingRequest(null)
