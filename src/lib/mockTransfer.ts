@@ -5,6 +5,7 @@ import {
   type ReceivedFile,
   type ReceiverApprovalRequest,
   type SessionInfo,
+  type TransferFileMeta,
   type TransferConnection,
 } from './transferTypes'
 
@@ -14,17 +15,13 @@ interface PendingReceiverRequest extends ReceiverApprovalRequest {
   state: RequestState
 }
 
-interface SentFileMeta {
-  name: string
-  size: number
-  type: string
-  sentAt: number
-}
+type SentFileMeta = TransferFileMeta
 
 interface MockSession {
   receiverConnected: boolean
   pendingFile?: File
   pendingFileMeta: SentFileMeta | null
+  pendingFileDataUrl: string | null
   receiverRequest: PendingReceiverRequest | null
   transferCompleted: boolean
   encryptedChunks?: ArrayBuffer[]
@@ -43,11 +40,64 @@ const REQUEST_APPROVAL_TIMEOUT_MS = 90_000
 const FILE_POLL_INTERVAL_MS = 280
 const FILE_AVAILABILITY_TIMEOUT_MS = 60_000
 const STORAGE_KEY_PREFIX = 'beam-mock-session:'
+const PAYLOAD_UNAVAILABLE_MARKER = '__beam_payload_unavailable__'
 
 const delay = (ms: number): Promise<void> => {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms)
   })
+}
+
+const blobToDataUrl = (blob: Blob): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+
+    reader.onload = () => {
+      if (typeof reader.result === 'string') {
+        resolve(reader.result)
+        return
+      }
+
+      reject(new Error('Failed to serialize file payload for mock transport.'))
+    }
+
+    reader.onerror = () => {
+      reject(new Error('Failed to read file payload for mock transport.'))
+    }
+
+    reader.readAsDataURL(blob)
+  })
+}
+
+const dataUrlToBlob = (dataUrl: string): Blob => {
+  const commaIndex = dataUrl.indexOf(',')
+  if (commaIndex === -1) {
+    throw new Error('Invalid file payload.')
+  }
+
+  const header = dataUrl.slice(0, commaIndex)
+  const payload = dataUrl.slice(commaIndex + 1)
+
+  const mimeMatch = /^data:(.*?);base64$/i.exec(header)
+  const mimeType = mimeMatch?.[1] || 'application/octet-stream'
+
+  const decoded = window.atob(payload)
+  const bytes = new Uint8Array(decoded.length)
+
+  for (let index = 0; index < decoded.length; index += 1) {
+    bytes[index] = decoded.charCodeAt(index)
+  }
+
+  return new Blob([bytes], { type: mimeType })
+}
+
+const buildSentFileMeta = (file: File): SentFileMeta => {
+  return {
+    name: file.name,
+    size: file.size,
+    type: file.type || 'application/octet-stream',
+    sentAt: Date.now(),
+  }
 }
 
 const ensureSession = (sessionId: string): MockSession => {
@@ -59,6 +109,7 @@ const ensureSession = (sessionId: string): MockSession => {
   const session: MockSession = {
     receiverConnected: false,
     pendingFileMeta: null,
+    pendingFileDataUrl: null,
     receiverRequest: null,
     transferCompleted: false,
     encryptedChunks: [],
@@ -124,6 +175,7 @@ const hydrateSessionFromStorage = (sessionId: string, session: MockSession): voi
       receiverConnected?: unknown
       receiverRequest?: unknown
       pendingFileMeta?: unknown
+      pendingFileDataUrl?: unknown
       transferCompleted?: unknown
     }
 
@@ -139,6 +191,12 @@ const hydrateSessionFromStorage = (sessionId: string, session: MockSession): voi
       session.pendingFileMeta = parsed.pendingFileMeta
     } else {
       session.pendingFileMeta = null
+    }
+
+    if (typeof parsed.pendingFileDataUrl === 'string') {
+      session.pendingFileDataUrl = parsed.pendingFileDataUrl
+    } else {
+      session.pendingFileDataUrl = null
     }
 
     const maybeRequest = parsed.receiverRequest
@@ -175,17 +233,28 @@ const hydrateSessionFromStorage = (sessionId: string, session: MockSession): voi
 }
 
 const persistSessionToStorage = (sessionId: string, session: MockSession): void => {
+  const payload = {
+    receiverConnected: session.receiverConnected,
+    receiverRequest: session.receiverRequest,
+    pendingFileMeta: session.pendingFileMeta,
+    pendingFileDataUrl: session.pendingFileDataUrl,
+    transferCompleted: session.transferCompleted,
+  }
+
   try {
-    window.localStorage.setItem(
-      getStorageKey(sessionId),
-      JSON.stringify({
-        receiverConnected: session.receiverConnected,
-        receiverRequest: session.receiverRequest,
-        pendingFileMeta: session.pendingFileMeta,
-        transferCompleted: session.transferCompleted,
-      }),
-    )
+    window.localStorage.setItem(getStorageKey(sessionId), JSON.stringify(payload))
   } catch {
+    // If payload is too large for localStorage, persist minimal session state.
+    try {
+      window.localStorage.setItem(
+        getStorageKey(sessionId),
+        JSON.stringify({
+          ...payload,
+          pendingFileDataUrl: payload.pendingFileDataUrl ? PAYLOAD_UNAVAILABLE_MARKER : null,
+        }),
+      )
+    } catch {
+    }
   }
 }
 
@@ -218,10 +287,17 @@ const waitForFileAvailability = async (
     hydrateSessionFromStorage(sessionId, session)
 
     if (session.pendingFile) {
-      return { file: session.pendingFile }
+      return {
+        file: session.pendingFile,
+        meta: session.pendingFileMeta ?? undefined,
+      }
     }
 
-    if (session.pendingFileMeta) {
+    if (session.pendingFileMeta && session.pendingFileDataUrl) {
+      return { meta: session.pendingFileMeta }
+    }
+
+    if (session.pendingFileMeta && session.encryptedChunks && session.encryptedChunks.length > 0) {
       return { meta: session.pendingFileMeta }
     }
 
@@ -242,6 +318,7 @@ export const createSession = (): SessionInfo => {
   session.receiverConnected = false
   session.pendingFile = undefined
   session.pendingFileMeta = null
+  session.pendingFileDataUrl = null
   session.receiverRequest = null
   session.transferCompleted = false
   persistSessionToStorage(sessionId, session)
@@ -269,6 +346,30 @@ export const getPendingReceiverRequest = (sessionId: string): ReceiverApprovalRe
   }
 
   return asPublicRequest(request)
+}
+
+export const publishPendingFileMeta = (sessionId: string, file: File | null): void => {
+  const session = getSession(sessionId)
+
+  if (!file) {
+    session.pendingFileMeta = null
+    session.pendingFileDataUrl = null
+    persistSessionToStorage(sessionId, session)
+    return
+  }
+
+  session.pendingFileMeta = buildSentFileMeta(file)
+  persistSessionToStorage(sessionId, session)
+}
+
+export const getPendingFileMeta = (sessionId: string): TransferFileMeta | null => {
+  const session = getSession(sessionId)
+
+  if (!session.pendingFileMeta) {
+    return null
+  }
+
+  return { ...session.pendingFileMeta }
 }
 
 export const requestReceiverConnection = async (sessionId: string): Promise<ReceiverApprovalRequest> => {
@@ -431,12 +532,14 @@ export const sendFile = async (
 
   session.transferCompleted = false
   session.pendingFile = file
-  session.pendingFileMeta = {
-    name: file.name,
-    size: file.size,
-    type: file.type || 'application/octet-stream',
-    sentAt: Date.now(),
+  session.pendingFileMeta = buildSentFileMeta(file)
+
+  try {
+    session.pendingFileDataUrl = await blobToDataUrl(file)
+  } catch {
+    session.pendingFileDataUrl = PAYLOAD_UNAVAILABLE_MARKER
   }
+
   persistSessionToStorage(connection.sessionId, session)
 
   session.encryptedChunks = [];
@@ -496,6 +599,7 @@ export const receiveFile = async (
   if (!availablePayload) {
     throw new Error('Timed out waiting for sender file.')
   }
+  hydrateSessionFromStorage(connection.sessionId, session)
 
   let output: ReceivedFile
 
@@ -525,18 +629,34 @@ export const receiveFile = async (
       type: fileMeta.type,
       blob: finalBlob,
     }
+  } else if (
+    availablePayload.meta &&
+    session.pendingFileDataUrl &&
+    session.pendingFileDataUrl !== PAYLOAD_UNAVAILABLE_MARKER
+  ) {
+    // Cross-tab mock mode: rebuild the original bytes from localStorage.
+    await emitProgress(onProgress, 1200)
+    const fileMeta = availablePayload.meta
+    const reconstructedBlob = dataUrlToBlob(session.pendingFileDataUrl)
+    output = {
+      name: fileMeta.name,
+      size: reconstructedBlob.size,
+      type: fileMeta.type,
+      blob: reconstructedBlob,
+    }
   } else {
-    // Cross-tab mock fallback (localStorage doesn't support ArrayBuffers that well)
+    // Last-resort fallback until real networking is implemented.
     await emitProgress(onProgress, 2200)
     const fileMeta = availablePayload.meta as SentFileMeta
+    const fallbackName = `${fileMeta.name}.mock.txt`
     const fallbackBlob = new Blob(
       [
-        `Beam mock transfer copy.\nOriginal file: ${fileMeta.name}\nOriginal size: ${fileMeta.size} bytes\nThis mock copy is generated for cross-tab demo mode.`,
+        `Beam mock transfer fallback.\nOriginal file: ${fileMeta.name}\nOriginal size: ${fileMeta.size} bytes\nTransferable bytes were unavailable in this session, so this text file was generated instead.`,
       ],
       { type: 'text/plain' },
     )
     output = {
-      name: fileMeta.name,
+      name: fallbackName,
       size: fallbackBlob.size,
       type: fallbackBlob.type,
       blob: fallbackBlob,

@@ -28,4 +28,11 @@ export interface ReceivedFile {
   blob: Blob
 }
 
+export interface TransferFileMeta {
+  name: string
+  size: number
+  type: string
+  sentAt: number
+}
+
 export type ProgressCallback = (progress: number) => void

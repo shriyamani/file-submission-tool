@@ -8,6 +8,28 @@ type InfoPage = 'transfer' | 'how' | 'security' | 'faq'
 type Theme = 'light' | 'dark'
 
 const THEME_STORAGE_KEY = 'beam-theme'
+const FAQ_ITEMS = [
+  {
+    question: 'How does Beam address Menlo Report ethics concerns?',
+    answer:
+      'Beam balances privacy with harm reduction through interface design. It provides user guidance, consent checkpoints, and clear transfer context instead of broad server-side surveillance.',
+  },
+  {
+    question: 'How does Beam support Respect for Law and Public Interest?',
+    answer:
+      'Beam includes visible usage guidance that reminds users not to share illegal or harmful content and to use the platform responsibly.',
+  },
+  {
+    question: 'How does Beam support Beneficence?',
+    answer:
+      'Receivers can review file name, size, and type before they accept a transfer. The app also encourages users to share links only through trusted communication channels.',
+  },
+  {
+    question: 'How does Beam respond to Justice concerns?',
+    answer:
+      'Because receivers face higher risk than senders, Beam adds a confirmation prompt before file receipt so the receiver keeps control over whether to continue.',
+  },
+]
 
 const readSessionIdFromLocation = (): string | null => {
   const url = new URL(window.location.href)
@@ -89,6 +111,80 @@ const App = () => {
     }
   }, [theme])
 
+  const renderInfoPanel = () => {
+    if (activePage === 'how') {
+      return (
+        <section className="beam-card beam-card--info">
+          <h2>How it works</h2>
+          <ol className="info-list">
+            <li>
+              <strong>Sender chooses a file and creates a share link.</strong>
+              <span>
+                The app creates a temporary session ID and adds it to the URL so a receiver can join the same session.
+              </span>
+            </li>
+            <li>
+              <strong>Receiver opens the link and requests access.</strong>
+              <span>
+                Sender must approve the request first, so only the intended receiver can continue.
+              </span>
+            </li>
+            <li>
+              <strong>Sender presses Send and receiver presses Receive file.</strong>
+              <span>
+                Transfer progress updates in both tabs, then the receiver gets a local Save file button.
+              </span>
+            </li>
+            <li>
+              <strong>The received file never uploads to a permanent cloud store in this demo.</strong>
+              <span>
+                This build keeps data in-browser for session simulation while full networking integration is in progress.
+              </span>
+            </li>
+          </ol>
+          <p className="info-note">
+            Current dev status: transport is mocked, so cross-device reliability depends on the networking layer that is
+            still being integrated.
+          </p>
+        </section>
+      )
+    }
+
+    if (activePage === 'security') {
+      return (
+        <section className="beam-card beam-card--placeholder">
+          <h2>Security</h2>
+          <p>Security details are still being documented. For now you can generate a sample key pair below.</p>
+          <div style={{ marginTop: '20px' }}>
+            <button onClick={handleGenerateKeys} className="beam-tab beam-tab--active">
+              {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
+            </button>
+          </div>
+        </section>
+      )
+    }
+
+    return (
+      <section className="beam-card beam-card--info">
+        <h2>FAQ</h2>
+        <div className="faq-list">
+          {FAQ_ITEMS.map((item, index) => {
+            return (
+              <details className="faq-item" key={item.question} open={index === 0}>
+                <summary className="faq-question">{item.question}</summary>
+                <p>{item.answer}</p>
+              </details>
+            )
+          })}
+        </div>
+        <p className="info-note">
+          Beam intentionally minimizes centralized oversight to preserve privacy, while these design choices provide
+          practical safeguards for safer use.
+        </p>
+      </section>
+    )
+  }
+
   return (
     <div className="beam-shell">
       <main className="beam-layout">
@@ -163,19 +259,7 @@ const App = () => {
 
           <div className="beam-panel">
             {activePage === 'transfer' && (sessionId ? <ReceiverView sessionId={sessionId} /> : <SenderView />)}
-            {activePage !== 'transfer' && (
-              <section className="beam-card beam-card--placeholder">
-                <h2>{activePage === 'how' ? 'How it works' : activePage === 'security' ? 'Security' : 'FAQ'}</h2>
-                <p>TO BE ADDED...</p>
-                {activePage === 'security' && (
-                  <div style={{ marginTop: '20px' }}>
-                    <button onClick={handleGenerateKeys} className="beam-tab beam-tab--active">
-                      {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
-                    </button>
-                  </div>
-                )}
-              </section>
-            )}
+            {activePage !== 'transfer' && renderInfoPanel()}
           </div>
         </section>
       </main>

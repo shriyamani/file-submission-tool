@@ -2,11 +2,12 @@ import { useEffect, useMemo, useState } from 'react'
 import ConfettiBurst from '../components/ConfettiBurst'
 import ProgressBar from '../components/ProgressBar'
 import StatusPill from '../components/StatusPill'
-import { receiveFile, requestReceiverConnection, waitForSenderApproval } from '../lib/mockTransfer'
+import { getPendingFileMeta, receiveFile, requestReceiverConnection, waitForSenderApproval } from '../lib/mockTransfer'
 import { generateECDHKeyPair } from '../utils/crypto'
 import {
   type ReceivedFile,
   type ReceiverApprovalRequest,
+  type TransferFileMeta,
   type TransferConnection,
   type TransferStatus,
 } from '../lib/transferTypes'
@@ -32,13 +33,35 @@ const formatBytes = (bytes: number): string => {
   return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
+const formatFileType = (type: string): string => {
+  if (!type || type === 'application/octet-stream') {
+    return 'Unknown'
+  }
+
+  return type
+}
+
+const isSameMeta = (left: TransferFileMeta | null, right: TransferFileMeta | null): boolean => {
+  if (!left && !right) {
+    return true
+  }
+
+  if (!left || !right) {
+    return false
+  }
+
+  return left.name === right.name && left.size === right.size && left.type === right.type && left.sentAt === right.sentAt
+}
+
 const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   const [connection, setConnection] = useState<TransferConnection | null>(null)
   const [pendingRequest, setPendingRequest] = useState<ReceiverApprovalRequest | null>(null)
+  const [pendingFileMeta, setPendingFileMeta] = useState<TransferFileMeta | null>(null)
   const [status, setStatus] = useState<TransferStatus>('idle')
   const [progress, setProgress] = useState(0)
   const [receivedFile, setReceivedFile] = useState<ReceivedFile | null>(null)
   const [downloadUrl, setDownloadUrl] = useState<string | null>(null)
+  const [noticeMessage, setNoticeMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
 
@@ -83,6 +106,29 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   }, [status])
 
   useEffect(() => {
+    const syncMeta = (): void => {
+      const nextMeta = getPendingFileMeta(sessionId)
+      setPendingFileMeta((currentMeta) => {
+        if (isSameMeta(currentMeta, nextMeta)) {
+          return currentMeta
+        }
+
+        return nextMeta
+      })
+    }
+
+    syncMeta()
+
+    const intervalId = window.setInterval(() => {
+      syncMeta()
+    }, 360)
+
+    return () => {
+      window.clearInterval(intervalId)
+    }
+  }, [sessionId])
+
+  useEffect(() => {
     if (!receivedFile) {
       setDownloadUrl(null)
       return
@@ -113,6 +159,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
   const handleConnect = async (): Promise<void> => {
     setErrorMessage('')
+    setNoticeMessage('')
     setProgress(0)
     setReceivedFile(null)
     setConnection(null)
@@ -159,6 +206,20 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     }
 
     setErrorMessage('')
+    setNoticeMessage('')
+
+    const advertisedMeta = getPendingFileMeta(connection.sessionId)
+    if (advertisedMeta) {
+      const accepted = window.confirm(
+        `Accept this file?\n\nName: ${advertisedMeta.name}\nSize: ${formatBytes(advertisedMeta.size)}\nType: ${formatFileType(advertisedMeta.type)}`,
+      )
+
+      if (!accepted) {
+        setNoticeMessage('Download canceled. Review file details and press Receive file when ready.')
+        return
+      }
+    }
+
     setProgress(0)
     setStatus('transferring')
 
@@ -219,11 +280,24 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
       <ProgressBar value={stageProgress} label={stageLabel} />
 
+      {pendingFileMeta && status !== 'done' && (
+        <div className="download-box">
+          <div>
+            <strong>Incoming file: {pendingFileMeta.name}</strong>
+            <span>
+              {formatBytes(pendingFileMeta.size)} | {formatFileType(pendingFileMeta.type)}
+            </span>
+          </div>
+        </div>
+      )}
+
       {receivedFile && downloadUrl && (
         <div className="download-box">
           <div>
             <strong>{receivedFile.name}</strong>
-            <span>{formatBytes(receivedFile.size)}</span>
+            <span>
+              {formatBytes(receivedFile.size)} | {formatFileType(receivedFile.type)}
+            </span>
           </div>
           <a className="btn btn-primary" href={downloadUrl} download={receivedFile.name}>
             Save file
@@ -238,6 +312,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
       )}
       {status === 'waiting' && !pendingRequest && <p className="message">Attempting connection...</p>}
       {status === 'connected' && <p className="message message--success">Connected. Press Receive file.</p>}
+      {noticeMessage && !errorMessage && <p className="message">{noticeMessage}</p>}
       {errorMessage && <p className="message message--error">{errorMessage}</p>}
     </section>
   )

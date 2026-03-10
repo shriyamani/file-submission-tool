@@ -274,6 +274,98 @@
   font-size: 0.95rem;
 }
 
+.beam-card--info h2 {
+  margin: 0;
+  font-family: 'Space Grotesk', 'Trebuchet MS', sans-serif;
+  color: var(--hero-title);
+  font-size: 1.62rem;
+}
+
+.info-list {
+  margin: 14px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 12px;
+}
+
+.info-list li {
+  color: var(--text);
+  font-size: 0.94rem;
+}
+
+.info-list li strong {
+  display: block;
+  font-family: 'Space Grotesk', 'Trebuchet MS', sans-serif;
+  font-size: 0.96rem;
+  color: var(--hero-title);
+}
+
+.info-list li span {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-soft);
+  line-height: 1.45;
+}
+
+.info-note {
+  margin-top: 16px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--soft-box-border);
+  background: var(--soft-box-bg);
+  color: var(--text-soft);
+  font-size: 0.88rem;
+}
+
+.faq-list {
+  margin-top: 14px;
+  display: grid;
+  gap: 12px;
+}
+
+.faq-item {
+  border: 1px solid var(--soft-box-border);
+  border-radius: 12px;
+  background: var(--soft-box-bg);
+  padding: 12px;
+}
+
+.faq-question {
+  margin: 0;
+  font-family: 'Space Grotesk', 'Trebuchet MS', sans-serif;
+  color: var(--hero-title);
+  font-size: 1rem;
+  cursor: pointer;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.faq-question::-webkit-details-marker {
+  display: none;
+}
+
+.faq-question::after {
+  content: '+';
+  flex-shrink: 0;
+  font-size: 1.2rem;
+  line-height: 1;
+  color: var(--text-soft);
+}
+
+.faq-item[open] .faq-question::after {
+  content: '-';
+}
+
+.faq-item p {
+  margin-top: 6px;
+  color: var(--text-soft);
+  font-size: 0.9rem;
+  line-height: 1.45;
+}
+
 .placeholder-gibberish {
   font-family: 'Space Grotesk', 'Trebuchet MS', sans-serif;
   font-size: 0.88rem;

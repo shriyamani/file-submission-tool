@@ -8,6 +8,7 @@ import {
   createSession,
   getPendingReceiverRequest,
   isTransferCompleted,
+  publishPendingFileMeta,
   rejectReceiverRequest,
   sendFile,
 } from '../lib/mockTransfer'
@@ -181,6 +182,9 @@ const SenderView = () => {
     setCopyState('idle')
 
     const nextSession = createSession()
+    if (file) {
+      publishPendingFileMeta(nextSession.sessionId, file)
+    }
     setSession(nextSession)
     setConnection(null)
     setPendingReceiver(null)
@@ -295,6 +299,10 @@ const SenderView = () => {
           setErrorMessage('')
           setNoticeMessage('')
 
+          if (session) {
+            publishPendingFileMeta(session.sessionId, nextFile)
+          }
+
           if (connection) {
             setStatus('connected')
             return
@@ -356,6 +364,10 @@ const SenderView = () => {
           {copyState === 'failed' && (
             <p className="message message--error">Clipboard is unavailable. Copy the link manually.</p>
           )}
+          <p className="message message--warning">
+            Use Beam responsibly: do not share illegal or harmful content. Share the link only through trusted
+            communication channels.
+          </p>
         </div>
       )}
 
