@@ -232,10 +232,7 @@ body {
   min-height: 100vh;
   color: var(--text);
   font-weight: 600;
-  background:
-    radial-gradient(circle at 14% 18%, var(--bg-spot-a), transparent 44%),
-    radial-gradient(circle at 84% 82%, var(--bg-spot-b), transparent 42%),
-    linear-gradient(160deg, var(--bg-gradient-start) 0%, var(--bg-gradient-mid) 52%, var(--bg-gradient-end) 100%);
+  background: var(--bg-gradient-start);
 }
 
 h1,
