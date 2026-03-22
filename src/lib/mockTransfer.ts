@@ -7,7 +7,14 @@ import {
   type SessionInfo,
   type TransferFileMeta,
   type TransferConnection,
+  type PeerRole,
 } from './transferTypes'
+
+import {
+  exportPublicKey,
+  importPublicKey,
+  deriveSessionKey as cryptoDeriveSessionKey,
+} from '../utils/crypto.js'
 
 type RequestState = 'pending' | 'approved' | 'rejected'
 
@@ -41,6 +48,8 @@ const FILE_POLL_INTERVAL_MS = 280
 const FILE_AVAILABILITY_TIMEOUT_MS = 60_000
 const STORAGE_KEY_PREFIX = 'beam-mock-session:'
 const PAYLOAD_UNAVAILABLE_MARKER = '__beam_payload_unavailable__'
+const PUBKEY_POLL_INTERVAL_MS = 200
+const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
 
 const delay = (ms: number): Promise<void> => {
   return new Promise((resolve) => {
@@ -518,6 +527,7 @@ export const waitForSenderApproval = async (
 export const sendFile = async (
   connection: TransferConnection,
   file: File,
+  sessionKey: CryptoKey,
   onProgress: ProgressCallback,
 ): Promise<void> => {
   if (!connection.connected) {
@@ -542,39 +552,23 @@ export const sendFile = async (
 
   persistSessionToStorage(connection.sessionId, session)
 
-  session.encryptedChunks = [];
+  session.encryptedChunks = []
+  session.dummyKey = sessionKey
 
-  // TODO [Shriya]: Mocking the session key here for now so my encryption 
-  // code runs. When you implement the WebRTC key exchange, you'll generate 
-  // this shared session key properly using `deriveSessionKey()` instead :)
-  const dummyKey = await window.crypto.subtle.generateKey(
-    { name: "AES-GCM", length: 256 },
-    true,
-    ["encrypt", "decrypt"]
-  ) as CryptoKey;
-  session.dummyKey = dummyKey;
-
-  const CHUNK_SIZE = 64 * 1024; // 64KB per chunk
-  const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-  let offset = 0;
-  let chunkIndex = 0;
+  const CHUNK_SIZE = 64 * 1024
+  const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+  let offset = 0
+  let chunkIndex = 0
 
   while (offset < file.size) {
-    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE);
-    const chunkBuffer = await chunkBlob.arrayBuffer();
-
-    // Encrypt the file chunk before we send it 
-    const encryptedBuffer = await encryptChunk(chunkBuffer, dummyKey);
-
-    // TODO [Shriya]: Instead of saving to this mock array, this is where you can send the `encryptedBuffer` over the network using your PeerJS connection
-    session.encryptedChunks.push(encryptedBuffer);
-
-    offset += CHUNK_SIZE;
-    chunkIndex++;
-    onProgress(Math.round((chunkIndex / totalChunks) * 100));
-
-    // Tiny delay to mock network speeds
-    await delay(10);
+    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE)
+    const chunkBuffer = await chunkBlob.arrayBuffer()
+    const encryptedBuffer = await encryptChunk(chunkBuffer, sessionKey)
+    session.encryptedChunks.push(encryptedBuffer)
+    offset += CHUNK_SIZE
+    chunkIndex++
+    onProgress(Math.round((chunkIndex / totalChunks) * 100))
+    await delay(10)
   }
 
   persistSessionToStorage(connection.sessionId, session)
@@ -582,6 +576,7 @@ export const sendFile = async (
 
 export const receiveFile = async (
   connection: TransferConnection,
+  sessionKey: CryptoKey,
   onProgress: ProgressCallback,
 ): Promise<ReceivedFile> => {
   if (!connection.connected) {
@@ -604,21 +599,20 @@ export const receiveFile = async (
   let output: ReceivedFile
 
   // If the mock session contains our encrypted chunks 
-  if (session.encryptedChunks && session.encryptedChunks.length > 0 && session.dummyKey) {
-    const decryptedBlobs: Blob[] = [];
-    let chunkIndex = 0;
-    const totalChunks = session.encryptedChunks.length;
+  if (session.encryptedChunks && session.encryptedChunks.length > 0 && sessionKey) {
+    const decryptedBlobs: Blob[] = []
+    let chunkIndex = 0
+    const totalChunks = session.encryptedChunks.length
 
-    // TODO [Shriya]: For WebRTC, you will be listening for incoming chunks via `peer.on('data')` instead of looping over this mock array. As they arrive, you can feed them to my decrypt method
     for (const encryptedBuffer of session.encryptedChunks) {
-      // Decrypt the chunk as it arrives from the network
-      const decryptedBuffer = await decryptChunk(encryptedBuffer, session.dummyKey);
-      decryptedBlobs.push(new Blob([decryptedBuffer]));
-
-      chunkIndex++;
-      onProgress(Math.round((chunkIndex / totalChunks) * 100));
-      await delay(10);
+      const decryptedBuffer = await decryptChunk(encryptedBuffer, sessionKey)  // ← use sessionKey
+      decryptedBlobs.push(new Blob([decryptedBuffer]))
+      chunkIndex++
+      onProgress(Math.round((chunkIndex / totalChunks) * 100))
+      await delay(10)
     }
+
+    console.log(`Decrypted ${session.encryptedChunks.length} chunks successfully`)
 
     const fileMeta = availablePayload.meta || session.pendingFileMeta!;
     const finalBlob = new Blob(decryptedBlobs, { type: fileMeta.type });
@@ -669,11 +663,55 @@ export const receiveFile = async (
   return output
 }
 
-export const deriveSessionKey = async (sessionId: string): Promise<CryptoKey | null> => {
-  void sessionId
+export const deriveSessionKey = async (
+  sessionId: string,
+  role: PeerRole,
+  privateKey: CryptoKey,
+  publicKey: CryptoKey,
+): Promise<CryptoKey | null> => {
+  // Step 1: Export our own public key to JWK and write it to localStorage
+  // so the other peer can find it
+  const ownJwk = await exportPublicKey(publicKey)
+  const ownPubKeyStorageKey = `${STORAGE_KEY_PREFIX}${sessionId}:pubkey:${role}`
+  window.localStorage.setItem(ownPubKeyStorageKey, JSON.stringify(ownJwk))
 
-  // TODO: Use Web Crypto (ECDH/AES-GCM) to derive a per-session key
-  return null
+  // Step 2: Poll localStorage for the other peer's public key
+  // Sender waits for receiver's key, receiver waits for sender's key
+  const otherRole: PeerRole = role === 'sender' ? 'receiver' : 'sender'
+  const otherPubKeyStorageKey = `${STORAGE_KEY_PREFIX}${sessionId}:pubkey:${otherRole}`
+  const timeoutAt = Date.now() + PUBKEY_EXCHANGE_TIMEOUT_MS
+
+  let otherPublicKey: CryptoKey | null = null
+
+  while (Date.now() < timeoutAt) {
+    const raw = window.localStorage.getItem(otherPubKeyStorageKey)
+
+    if (raw) {
+      try {
+        const jwk = JSON.parse(raw) as JsonWebKey
+        otherPublicKey = await importPublicKey(jwk)
+        break
+      } catch {
+        // Malformed key in storage — keep polling
+      }
+    }
+
+    await delay(PUBKEY_POLL_INTERVAL_MS)
+  }
+
+  if (!otherPublicKey) {
+    throw new Error(`Timed out waiting for ${otherRole} public key.`)
+  }
+
+  // Step 3: Derive the shared AES-GCM session key using our private key
+  // and the other peer's public key. Both peers end up with the same key
+  // because ECDH is symmetric: derive(privA, pubB) === derive(privB, pubA)
+  const sessionKey = await cryptoDeriveSessionKey(privateKey, otherPublicKey)
+
+  const exported = await window.crypto.subtle.exportKey('raw', sessionKey)
+  console.log(`[${role}] derived key:`, new Uint8Array(exported).toString())
+
+  return sessionKey
 }
 
 export const encryptChunk = async (

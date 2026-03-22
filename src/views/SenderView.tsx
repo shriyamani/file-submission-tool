@@ -6,12 +6,12 @@ import StatusPill from '../components/StatusPill'
 import {
   approveReceiverRequest,
   createSession,
-  getPendingReceiverRequest,
-  isTransferCompleted,
+  initSenderPeer,
   publishPendingFileMeta,
   rejectReceiverRequest,
   sendFile,
-} from '../lib/mockTransfer'
+  deriveSessionKey,
+} from '../lib/peerTransfer'
 import { generateECDHKeyPair } from '../utils/crypto'
 import {
   type ReceiverApprovalRequest,
@@ -31,6 +31,7 @@ const SenderView = () => {
   const [errorMessage, setErrorMessage] = useState('')
   const [noticeMessage, setNoticeMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
+  const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null)
 
   const shouldWarnBeforeClose = Boolean(
     session && (status === 'waiting' || status === 'connected' || status === 'transferring' || pendingReceiver),
@@ -119,62 +120,6 @@ const SenderView = () => {
     }
   }, [status])
 
-  useEffect(() => {
-    if (!session || status === 'transferring') {
-      return
-    }
-
-    const intervalId = window.setInterval(() => {
-      const request = getPendingReceiverRequest(session.sessionId)
-      if (!request) {
-        if (pendingReceiver) {
-          setPendingReceiver(null)
-        }
-        return
-      }
-
-      if (pendingReceiver && pendingReceiver.requestId === request.requestId) {
-        return
-      }
-
-      setPendingReceiver(request)
-      setConnection(null)
-      setStatus('waiting')
-      setErrorMessage('')
-      setNoticeMessage('Receiver pressed Connect. Approve or reject first.')
-    }, 320)
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
-  }, [pendingReceiver, session, status])
-
-  useEffect(() => {
-    if (!session) {
-      return
-    }
-
-    const intervalId = window.setInterval(() => {
-      if (!isTransferCompleted(session.sessionId)) {
-        return
-      }
-
-      setProgress(100)
-      setStatus((current) => {
-        if (current === 'error') {
-          return current
-        }
-
-        return 'done'
-      })
-      setNoticeMessage('Receiver finished downloading the file.')
-    }, 360)
-
-    return () => {
-      window.clearInterval(intervalId)
-    }
-  }, [session])
-
   const handleCreateSession = async (): Promise<void> => {
     setErrorMessage('')
     setNoticeMessage('')
@@ -192,9 +137,22 @@ const SenderView = () => {
 
     try {
       const generatedKeys = await generateECDHKeyPair()
-      console.log('Session secured! Generated keys for Sender:', generatedKeys)
+      setKeyPair(generatedKeys)
     } catch (err) {
       console.error('Failed to generate keys for session', err)
+    }
+
+    try {
+      await initSenderPeer(nextSession.sessionId, (request) => {
+        setPendingReceiver(request)
+        setConnection(null)
+        setStatus('waiting')
+        setErrorMessage('')
+        setNoticeMessage('Receiver pressed Connect. Approve or reject first.')
+      })
+    } catch (err) {
+      setStatus('error')
+      setErrorMessage('Failed to initialize session. Please try again.')
     }
   }
 
@@ -245,7 +203,7 @@ const SenderView = () => {
   }
 
   const handleSend = async (): Promise<void> => {
-    if (!file || !connection) {
+    if (!file || !connection || !keyPair || !session) {
       return
     }
 
@@ -254,13 +212,24 @@ const SenderView = () => {
     setStatus('transferring')
 
     try {
-      await sendFile(connection, file, (nextProgress) => {
+      const sessionKey = await deriveSessionKey(
+        session.sessionId,
+        'sender',
+        keyPair.privateKey,
+        keyPair.publicKey,
+      )
+
+      if (!sessionKey) {
+        throw new Error('Failed to derive session key.')
+      }
+
+      await sendFile(connection, file, sessionKey, (nextProgress: number) => {
         setProgress(nextProgress)
       })
 
-      setProgress(90)
-      setStatus('connected')
-      setNoticeMessage('Upload complete. Waiting for receiver download confirmation.')
+      setProgress(100)
+      setStatus('done')
+      setNoticeMessage('File sent successfully.')
     } catch {
       setStatus('error')
       setErrorMessage('Transfer failed. Generate a new session and retry.')
