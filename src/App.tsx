@@ -130,7 +130,7 @@ const App = () => {
               </span>
             </li>
             <li>
-              <strong>Sender presses Send and receiver presses Receive file.</strong>
+              <strong>Receiver presses Receive file, then Sender presses Send.</strong>
               <span>
                 Transfer progress updates in both tabs, then the receiver gets a local Save file button.
               </span>
