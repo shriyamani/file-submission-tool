@@ -2,7 +2,13 @@ import { useEffect, useMemo, useState } from 'react'
 import ConfettiBurst from '../components/ConfettiBurst'
 import ProgressBar from '../components/ProgressBar'
 import StatusPill from '../components/StatusPill'
-import { getPendingFileMeta, receiveFile, requestReceiverConnection, waitForSenderApproval } from '../lib/mockTransfer'
+import { 
+  getPendingFileMeta, 
+  receiveFile, 
+  requestReceiverConnection, 
+  waitForSenderApproval,
+  deriveSessionKey,
+} from '../lib/peerTransfer'
 import { generateECDHKeyPair } from '../utils/crypto'
 import {
   type ReceivedFile,
@@ -64,6 +70,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   const [noticeMessage, setNoticeMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
+  const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null)
 
   const stageProgress = useMemo(() => {
     if (status === 'done') {
@@ -170,7 +177,6 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
       const request = await requestReceiverConnection(sessionId)
       setPendingRequest(request)
 
-      // TODO: Replace with actual PeerJS/WebRTC receiver join flow + sender auth.
       const receiverConnection = await waitForSenderApproval(sessionId, request.requestId)
       setConnection(receiverConnection)
       setPendingRequest(null)
@@ -178,9 +184,10 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
       try {
         const generatedKeys = await generateECDHKeyPair()
-        console.log('Receiver connected! Generated keys for Receiver:', generatedKeys)
+        setKeyPair(generatedKeys)
       } catch (err) {
-        console.error('Failed to generate keys for receiver', err)
+        setStatus('error')
+        setErrorMessage('Failed to generate encryption keys. Press Connect and try again.')
       }
     } catch (error) {
       setStatus('error')
@@ -201,7 +208,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   }
 
   const handleReceive = async (): Promise<void> => {
-    if (!connection) {
+    if (!connection || !keyPair) {
       return
     }
 
@@ -224,7 +231,18 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     setStatus('transferring')
 
     try {
-      const file = await receiveFile(connection, (nextProgress) => {
+      const sessionKey = await deriveSessionKey(
+        connection.sessionId,
+        'receiver',
+        keyPair.privateKey,
+        keyPair.publicKey,
+      )
+
+      if (!sessionKey) {
+        throw new Error('Failed to derive session key.')
+      }
+
+      const file = await receiveFile(connection, sessionKey, (nextProgress: number) => {
         setProgress(nextProgress)
       })
 
@@ -272,7 +290,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
           className="btn btn-secondary"
           type="button"
           onClick={handleReceive}
-          disabled={!connection || status === 'waiting' || status === 'transferring'}
+          disabled={!connection || !keyPair || status === 'waiting' || status === 'transferring'}
         >
           Receive file
         </button>
