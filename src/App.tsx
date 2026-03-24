@@ -1,35 +1,122 @@
 import { useEffect, useState } from 'react'
 import ReceiverView from './views/ReceiverView'
 import SenderView from './views/SenderView'
-import { generateECDHKeyPair } from './utils/crypto'
+import type { TransferMode } from './lib/transferTypes'
 import './App.css'
 
-type InfoPage = 'transfer' | 'how' | 'security' | 'faq'
+type InfoPage = 'transfer' | 'how' | 'safety' | 'faq'
 type Theme = 'light' | 'dark'
+
+interface TransferRoute {
+  mode: TransferMode
+  sessionId: string | null
+}
+
+interface FlowStep {
+  eyebrow: string
+  title: string
+  body: string
+}
 
 const THEME_STORAGE_KEY = 'beam-theme'
 const FAQ_ITEMS = [
   {
-    question: 'How does Beam address Menlo Report ethics concerns?',
+    question: 'How is Beam different from other sharing methods?',
     answer:
-      'Beam balances privacy with harm reduction through interface design. It provides user guidance, consent checkpoints, and clear transfer context instead of broad server-side surveillance.',
+      'Beam is built around a live handoff instead of a passive upload link. The sender approves the receiver first, then the receiver reviews the file before accepting it.',
   },
   {
-    question: 'How does Beam support Respect for Law and Public Interest?',
+    question: 'Why is Beam trustworthy?',
     answer:
-      'Beam includes visible usage guidance that reminds users not to share illegal or harmful content and to use the platform responsibly.',
+      'Trust comes from visible checkpoints: the sender must approve the receiver, the receiver sees file details before accepting, and both sides stay in the loop throughout the transfer.',
   },
   {
-    question: 'How does Beam support Beneficence?',
+    question: 'What should I do for another computer?',
     answer:
-      'Receivers can review file name, size, and type before they accept a transfer. The app also encourages users to share links only through trusted communication channels.',
+      'Open Beam from a reachable network address first, then generate the share link from that page. A localhost link only works on the same machine.',
   },
   {
-    question: 'How does Beam respond to Justice concerns?',
+    question: 'How does Beam handle privacy, consent, and Menlo ethics?',
     answer:
-      'Because receivers face higher risk than senders, Beam adds a confirmation prompt before file receipt so the receiver keeps control over whether to continue.',
+      'Beam combines privacy with consent checkpoints: it limits unnecessary oversight, keeps sender approval in place, gives the receiver file context before download, and adds usage guidance so law, beneficence, and fairness are all addressed in one flow.',
   },
 ]
+
+const HOW_STEPS: FlowStep[] = [
+  {
+    eyebrow: 'Step 01',
+    title: 'Generate the link',
+    body: 'Open Beam on the sender side, keep that tab open, and create a fresh session link for this transfer.',
+  },
+  {
+    eyebrow: 'Step 02',
+    title: 'Share and connect',
+    body: 'Send the link to the receiver. They open it and press Connect so the sender gets the approval request.',
+  },
+  {
+    eyebrow: 'Step 03',
+    title: 'Approve the receiver',
+    body: 'The sender reviews the request and approves it before any file step can continue.',
+  },
+  {
+    eyebrow: 'Step 04',
+    title: 'Offer the file',
+    body: 'The sender drops in the file or clicks browse, then presses Send to offer that file to the receiver.',
+  },
+  {
+    eyebrow: 'Step 05',
+    title: 'Receive and save',
+    body: 'The receiver accepts the popup, receives the file, and saves it locally once the transfer completes.',
+  },
+]
+
+const SAFETY_STEPS: FlowStep[] = [
+  {
+    eyebrow: 'Safety 01',
+    title: 'Share links carefully',
+    body: 'Treat each Beam link like an invitation. Only send it to the exact person who should receive the file.',
+  },
+  {
+    eyebrow: 'Safety 02',
+    title: 'Sender approval stays in control',
+    body: 'A receiver cannot continue until the sender approves that specific request from the sender tab.',
+  },
+  {
+    eyebrow: 'Safety 03',
+    title: 'Receiver checks the file first',
+    body: 'The receiver sees the file name, size, and type before accepting the incoming transfer.',
+  },
+  {
+    eyebrow: 'Safety 04',
+    title: 'Use a reachable address',
+    body: 'For another computer, generate the link from a Beam page the other device can actually open.',
+  },
+  {
+    eyebrow: 'Safety 05',
+    title: 'Keep the tabs open',
+    body: 'Closing either side during approval, sending, or receiving can interrupt the transfer and require a fresh link.',
+  },
+  {
+    eyebrow: 'Safety 06',
+    title: 'This is still a dev build',
+    body: 'Beam is designed for direct transfer, but this project should not be treated as hardened long-term storage.',
+  },
+]
+
+const isLocalHost = (hostName: string): boolean => {
+  return hostName === 'localhost' || hostName === '127.0.0.1'
+}
+
+const readTransferModeFromLocation = (): TransferMode => {
+  const url = new URL(window.location.href)
+  const fromQuery = url.searchParams.get('mode')
+
+  if (fromQuery === 'local' || fromQuery === 'network') {
+    return fromQuery
+  }
+
+  return isLocalHost(url.hostname) ? 'local' : 'network'
+}
 
 const readSessionIdFromLocation = (): string | null => {
   const url = new URL(window.location.href)
@@ -54,6 +141,13 @@ const readSessionIdFromLocation = (): string | null => {
   return decodeURIComponent(hashValue)
 }
 
+const readTransferRouteFromLocation = (): TransferRoute => {
+  return {
+    mode: readTransferModeFromLocation(),
+    sessionId: readSessionIdFromLocation(),
+  }
+}
+
 const readInitialTheme = (): Theme => {
   try {
     const storedValue = window.localStorage.getItem(THEME_STORAGE_KEY)
@@ -71,25 +165,49 @@ const readInitialTheme = (): Theme => {
   return 'light'
 }
 
+const SunIcon = () => {
+  return (
+    <svg aria-hidden="true" className="theme-slider__icon" viewBox="0 0 24 24">
+      <circle cx="12" cy="12" r="4.25" fill="currentColor" />
+      <path
+        d="M12 1.75v3.1M12 19.15v3.1M4.85 4.85l2.2 2.2M16.95 16.95l2.2 2.2M1.75 12h3.1M19.15 12h3.1M4.85 19.15l2.2-2.2M16.95 7.05l2.2-2.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.7"
+      />
+    </svg>
+  )
+}
+
+const MoonIcon = () => {
+  return (
+    <svg aria-hidden="true" className="theme-slider__icon" viewBox="0 0 24 24">
+      <path
+        d="M15.4 3.75a8.75 8.75 0 1 0 5 15.4 9.2 9.2 0 0 1-3.15.55 9.2 9.2 0 0 1-9.2-9.2 9.2 9.2 0 0 1 7.35-8.99Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.9"
+      />
+      <path d="M17.7 5.2v2.1M16.65 6.25h2.1" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.7" />
+    </svg>
+  )
+}
+
 const App = () => {
-  const [sessionId, setSessionId] = useState<string | null>(() => {
-    return readSessionIdFromLocation()
+  const [transferRoute, setTransferRoute] = useState<TransferRoute>(() => {
+    return readTransferRouteFromLocation()
   })
   const [activePage, setActivePage] = useState<InfoPage>('transfer')
   const [theme, setTheme] = useState<Theme>(() => {
     return readInitialTheme()
   })
-  const [keysGenerated, setKeysGenerated] = useState(false)
-
-  const handleGenerateKeys = async () => {
-    const keys = await generateECDHKeyPair()
-    console.log('Generated Keys:', keys)
-    setKeysGenerated(true)
-  }
 
   useEffect(() => {
     const syncFromUrl = (): void => {
-      setSessionId(readSessionIdFromLocation())
+      setTransferRoute(readTransferRouteFromLocation())
     }
 
     window.addEventListener('popstate', syncFromUrl)
@@ -111,62 +229,60 @@ const App = () => {
     }
   }, [theme])
 
+  const renderFlowPanel = (title: string, intro: string, steps: FlowStep[], note: string) => {
+    return (
+      <section className="beam-card beam-card--info">
+        <h2>{title}</h2>
+        <p className="flow-intro">{intro}</p>
+        <div className="flow-stack">
+          {steps.map((step, index) => {
+            return (
+              <div className="flow-segment" key={step.eyebrow}>
+                <article className="flow-card">
+                  <div className="flow-card__top">
+                    <span className="flow-card__eyebrow">{step.eyebrow}</span>
+                    <span className="flow-card__dot" aria-hidden />
+                  </div>
+                  <h3>{step.title}</h3>
+                  <p>{step.body}</p>
+                </article>
+                {index < steps.length - 1 && (
+                  <div className="flow-arrow" aria-hidden>
+                    <span />
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+        <p className="info-note">{note}</p>
+      </section>
+    )
+  }
+
   const renderInfoPanel = () => {
     if (activePage === 'how') {
-      return (
-        <section className="beam-card beam-card--info">
-          <h2>How it works</h2>
-          <ol className="info-list">
-            <li>
-              <strong>Sender chooses a file and creates a share link.</strong>
-              <span>
-                The app creates a temporary session ID and adds it to the URL so a receiver can join the same session.
-              </span>
-            </li>
-            <li>
-              <strong>Receiver opens the link and requests access.</strong>
-              <span>
-                Sender must approve the request first, so only the intended receiver can continue.
-              </span>
-            </li>
-            <li>
-              <strong>Receiver presses Receive file, then Sender presses Send.</strong>
-              <span>
-                Transfer progress updates in both tabs, then the receiver gets a local Save file button.
-              </span>
-            </li>
-            <li>
-              <strong>The received file never uploads to a permanent cloud store in this demo.</strong>
-              <span>
-                This build keeps data in-browser for session simulation while full networking integration is in progress.
-              </span>
-            </li>
-          </ol>
-          <p className="info-note">
-            Current dev status: transport is mocked, so cross-device reliability depends on the networking layer that is
-            still being integrated.
-          </p>
-        </section>
+      return renderFlowPanel(
+        'How it works',
+        'Beam moves through a fixed handoff: link first, approval second, file transfer last.',
+        HOW_STEPS,
+        'Use a fresh session link for each transfer and keep the sender tab open until the receiver has saved the file.',
       )
     }
 
-    if (activePage === 'security') {
-      return (
-        <section className="beam-card beam-card--placeholder">
-          <h2>Security</h2>
-          <p>Security details are still being documented. For now you can generate a sample key pair below.</p>
-          <div style={{ marginTop: '20px' }}>
-            <button onClick={handleGenerateKeys} className="beam-tab beam-tab--active">
-              {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
-            </button>
-          </div>
-        </section>
+    if (activePage === 'safety') {
+      return renderFlowPanel(
+        'Privacy & Safety',
+        'The goal is simple: keep control with the sender, keep context with the receiver, and keep the link private.',
+        SAFETY_STEPS,
+        'Beam is best for trusted person-to-person transfers. Do not share harmful or illegal content, and regenerate the link for every new session.',
       )
     }
 
     return (
       <section className="beam-card beam-card--info">
         <h2>FAQ</h2>
+        <p className="flow-intro">Quick answers for the questions people usually ask before they send the link.</p>
         <div className="faq-list">
           {FAQ_ITEMS.map((item, index) => {
             return (
@@ -177,10 +293,6 @@ const App = () => {
             )
           })}
         </div>
-        <p className="info-note">
-          Beam intentionally minimizes centralized oversight to preserve privacy, while these design choices provide
-          practical safeguards for safer use.
-        </p>
       </section>
     )
   }
@@ -213,13 +325,13 @@ const App = () => {
                 How it works
               </button>
               <button
-                className={`beam-tab${activePage === 'security' ? ' beam-tab--active' : ''}`}
+                className={`beam-tab${activePage === 'safety' ? ' beam-tab--active' : ''}`}
                 type="button"
                 onClick={() => {
-                  setActivePage('security')
+                  setActivePage('safety')
                 }}
               >
-                Security
+                Privacy &amp; Safety
               </button>
               <button
                 className={`beam-tab${activePage === 'faq' ? ' beam-tab--active' : ''}`}
@@ -232,23 +344,39 @@ const App = () => {
               </button>
             </nav>
             <div className="topbar-right">
-              <button
+              <div
                 className={`theme-slider${theme === 'dark' ? ' theme-slider--dark' : ''}`}
-                type="button"
-                role="switch"
-                aria-checked={theme === 'dark'}
-                aria-label="Toggle dark mode"
-                onClick={() => {
-                  setTheme((currentTheme) => {
-                    return currentTheme === 'light' ? 'dark' : 'light'
-                  })
-                }}
+                role="group"
+                aria-label="Theme mode"
               >
-                <span className="theme-slider__label theme-slider__label--light">Light</span>
-                <span className="theme-slider__label theme-slider__label--dark">Dark</span>
-                <span className="theme-slider__thumb" aria-hidden />
-              </button>
-              <div className="mode-badge">{sessionId ? 'Receiver mode' : 'Sender mode'}</div>
+                <button
+                  className={`theme-slider__button${theme === 'light' ? ' theme-slider__button--active' : ''}`}
+                  type="button"
+                  aria-label="Light mode"
+                  aria-pressed={theme === 'light'}
+                  data-tooltip="Light mode"
+                  title="Light mode"
+                  onClick={() => {
+                    setTheme('light')
+                  }}
+                >
+                  <SunIcon />
+                </button>
+                <button
+                  className={`theme-slider__button${theme === 'dark' ? ' theme-slider__button--active' : ''}`}
+                  type="button"
+                  aria-label="Dark mode"
+                  aria-pressed={theme === 'dark'}
+                  data-tooltip="Dark mode"
+                  title="Dark mode"
+                  onClick={() => {
+                    setTheme('dark')
+                  }}
+                >
+                  <MoonIcon />
+                </button>
+              </div>
+              <div className="mode-badge">{transferRoute.sessionId ? 'Receiver mode' : 'Sender mode'}</div>
             </div>
           </header>
 
@@ -258,7 +386,12 @@ const App = () => {
           </div>
 
           <div className="beam-panel">
-            {activePage === 'transfer' && (sessionId ? <ReceiverView sessionId={sessionId} /> : <SenderView />)}
+            {activePage === 'transfer' &&
+              (transferRoute.sessionId ? (
+                <ReceiverView sessionId={transferRoute.sessionId} transportMode={transferRoute.mode} />
+              ) : (
+                <SenderView />
+              ))}
             {activePage !== 'transfer' && renderInfoPanel()}
           </div>
         </section>

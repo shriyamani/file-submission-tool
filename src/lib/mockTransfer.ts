@@ -338,6 +338,7 @@ export const createSession = (): SessionInfo => {
     sessionId,
     shareUrl,
     createdAt: Date.now(),
+    mode: 'local',
   }
 }
 
@@ -400,6 +401,20 @@ export const requestReceiverConnection = async (sessionId: string): Promise<Rece
   return asPublicRequest(request)
 }
 
+export const seedReceiverRequest = (sessionId: string, request: ReceiverApprovalRequest): void => {
+  const session = getSession(sessionId)
+
+  session.receiverConnected = false
+  session.receiverRequest = {
+    requestId: request.requestId,
+    receiverLabel: request.receiverLabel,
+    requestedAt: request.requestedAt,
+    state: 'pending',
+  }
+
+  persistSessionToStorage(sessionId, session)
+}
+
 export const approveReceiverRequest = async (
   sessionId: string,
   requestId: string,
@@ -412,6 +427,7 @@ export const approveReceiverRequest = async (
     sessionId,
     role: 'sender',
     connected: true,
+    mode: 'local',
   }
 
   if (!request) {
@@ -483,6 +499,7 @@ export const waitForSenderApproval = async (
     sessionId,
     role: 'receiver',
     connected: true,
+    mode: 'local',
   }
 
   while (Date.now() < timeoutAt) {

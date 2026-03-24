@@ -1,11 +1,13 @@
 export type TransferStatus = 'idle' | 'waiting' | 'connected' | 'transferring' | 'done' | 'error'
 
 export type PeerRole = 'sender' | 'receiver'
+export type TransferMode = 'local' | 'network'
 
 export interface SessionInfo {
   sessionId: string
   shareUrl: string
   createdAt: number
+  mode: TransferMode
 }
 
 export interface TransferConnection {
@@ -13,6 +15,7 @@ export interface TransferConnection {
   sessionId: string
   role: PeerRole
   connected: boolean
+  mode: TransferMode
 }
 
 export interface ReceiverApprovalRequest {

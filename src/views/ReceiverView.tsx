@@ -2,24 +2,29 @@ import { useEffect, useMemo, useState } from 'react'
 import ConfettiBurst from '../components/ConfettiBurst'
 import ProgressBar from '../components/ProgressBar'
 import StatusPill from '../components/StatusPill'
-import { 
-  getPendingFileMeta, 
-  receiveFile, 
-  requestReceiverConnection, 
-  waitForSenderApproval,
+import {
+  confirmIncomingFileReceipt,
+  declineIncomingFileReceipt,
   deriveSessionKey,
-} from '../lib/peerTransfer'
-import { generateECDHKeyPair } from '../utils/crypto'
+  dismissPendingFileMeta,
+  getPendingFileMeta,
+  receiveFile,
+  requestReceiverConnection,
+  waitForSenderApproval,
+} from '../lib/transferClient'
 import {
   type ReceivedFile,
   type ReceiverApprovalRequest,
-  type TransferFileMeta,
+  type TransferMode,
   type TransferConnection,
+  type TransferFileMeta,
   type TransferStatus,
 } from '../lib/transferTypes'
+import { generateECDHKeyPair } from '../utils/crypto'
 
 interface ReceiverViewProps {
   sessionId: string
+  transportMode: TransferMode
 }
 
 const formatBytes = (bytes: number): string => {
@@ -59,7 +64,37 @@ const isSameMeta = (left: TransferFileMeta | null, right: TransferFileMeta | nul
   return left.name === right.name && left.size === right.size && left.type === right.type && left.sentAt === right.sentAt
 }
 
-const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
+const getConnectionErrorMessage = (error: unknown): string => {
+  if (!(error instanceof Error)) {
+    return 'Could not connect to sender. Verify the session link and retry.'
+  }
+
+  const normalized = error.message.toLowerCase()
+
+  if (normalized.includes('rejected')) {
+    return 'Sender rejected your connection request. Ask them to approve and try again.'
+  }
+
+  if (normalized.includes('timed out')) {
+    return 'Sender did not approve in time. Press Connect and try again.'
+  }
+
+  if (
+    normalized.includes('could not connect to peer') ||
+    normalized.includes('peer unavailable') ||
+    normalized.includes('no active connection')
+  ) {
+    return 'Could not reach the sender session. Make sure the sender kept the page open and shared a reachable session link.'
+  }
+
+  if (normalized.includes('network') || normalized.includes('server')) {
+    return 'Could not reach the connection server. Check internet access on both devices and reload the page.'
+  }
+
+  return `Could not connect to sender. ${error.message}`
+}
+
+const ReceiverView = ({ sessionId, transportMode }: ReceiverViewProps) => {
   const [connection, setConnection] = useState<TransferConnection | null>(null)
   const [pendingRequest, setPendingRequest] = useState<ReceiverApprovalRequest | null>(null)
   const [pendingFileMeta, setPendingFileMeta] = useState<TransferFileMeta | null>(null)
@@ -70,6 +105,8 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   const [noticeMessage, setNoticeMessage] = useState('')
   const [errorMessage, setErrorMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
+  const [showReceivePrompt, setShowReceivePrompt] = useState(false)
+  const [isReceivePromptBusy, setIsReceivePromptBusy] = useState(false)
   const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null)
 
   const stageProgress = useMemo(() => {
@@ -94,7 +131,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
   const stageLabel = useMemo(() => {
     if (status === 'done') {
-      return 'Download complete'
+      return 'File ready to download'
     }
 
     if (status === 'transferring') {
@@ -102,19 +139,23 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     }
 
     if (status === 'connected') {
-      return 'Sender approved. Ready to receive'
+      if (pendingFileMeta) {
+        return 'Incoming file ready to review'
+      }
+
+      return 'Sender approved. Waiting for sender file'
     }
 
     if (status === 'waiting') {
-      return 'Waiting for sender approval'
+      return pendingRequest ? 'Waiting for sender approval' : 'Connecting to sender'
     }
 
     return 'Press Connect to request access'
-  }, [status])
+  }, [pendingFileMeta, pendingRequest, status])
 
   useEffect(() => {
     const syncMeta = (): void => {
-      const nextMeta = getPendingFileMeta(sessionId)
+      const nextMeta = getPendingFileMeta(transportMode, sessionId)
       setPendingFileMeta((currentMeta) => {
         if (isSameMeta(currentMeta, nextMeta)) {
           return currentMeta
@@ -133,7 +174,39 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     return () => {
       window.clearInterval(intervalId)
     }
-  }, [sessionId])
+  }, [sessionId, transportMode])
+
+  useEffect(() => {
+    if (!pendingFileMeta || receivedFile) {
+      return
+    }
+
+    if (!connection) {
+      setConnection({
+        id: `receiver-${sessionId}`,
+        sessionId,
+        role: 'receiver',
+        connected: true,
+        mode: transportMode,
+      })
+    }
+
+    if (status === 'waiting') {
+      setPendingRequest(null)
+      setStatus('connected')
+    }
+
+    if (!keyPair) {
+      void generateECDHKeyPair()
+        .then((generatedKeys) => {
+          setKeyPair(generatedKeys)
+        })
+        .catch(() => {
+          setStatus('error')
+          setErrorMessage('Failed to prepare secure receive step. Reload and try again.')
+        })
+    }
+  }, [connection, keyPair, pendingFileMeta, receivedFile, sessionId, status, transportMode])
 
   useEffect(() => {
     if (!receivedFile) {
@@ -150,11 +223,19 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   }, [receivedFile])
 
   useEffect(() => {
-    if (status !== 'done') {
+    if (!pendingFileMeta || receivedFile || !connection || !keyPair) {
+      setShowReceivePrompt(false)
       return
     }
 
-    setShowConfetti(true)
+    setShowReceivePrompt(true)
+  }, [connection, keyPair, pendingFileMeta, receivedFile])
+
+  useEffect(() => {
+    if (!showConfetti) {
+      return
+    }
+
     const timerId = window.setTimeout(() => {
       setShowConfetti(false)
     }, 3000)
@@ -162,7 +243,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     return () => {
       window.clearTimeout(timerId)
     }
-  }, [status])
+  }, [showConfetti])
 
   const handleConnect = async (): Promise<void> => {
     setErrorMessage('')
@@ -170,14 +251,18 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     setProgress(0)
     setReceivedFile(null)
     setConnection(null)
+    setKeyPair(null)
     setPendingRequest(null)
+    setPendingFileMeta(null)
+    setShowReceivePrompt(false)
+    setShowConfetti(false)
     setStatus('waiting')
 
     try {
-      const request = await requestReceiverConnection(sessionId)
+      const request = await requestReceiverConnection(transportMode, sessionId)
       setPendingRequest(request)
 
-      const receiverConnection = await waitForSenderApproval(sessionId, request.requestId)
+      const receiverConnection = await waitForSenderApproval(transportMode, sessionId, request.requestId)
       setConnection(receiverConnection)
       setPendingRequest(null)
       setStatus('connected')
@@ -185,79 +270,106 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
       try {
         const generatedKeys = await generateECDHKeyPair()
         setKeyPair(generatedKeys)
-      } catch (err) {
+      } catch {
         setStatus('error')
         setErrorMessage('Failed to generate encryption keys. Press Connect and try again.')
       }
     } catch (error) {
       setStatus('error')
       setPendingRequest(null)
-
-      if (error instanceof Error && error.message.toLowerCase().includes('rejected')) {
-        setErrorMessage('Sender rejected your connection request. Ask them to approve and try again.')
-        return
-      }
-
-      if (error instanceof Error && error.message.toLowerCase().includes('timed out')) {
-        setErrorMessage('Sender did not approve in time. Press Connect and try again.')
-        return
-      }
-
-      setErrorMessage('Could not connect to sender. Verify the session link and retry.')
+      setErrorMessage(getConnectionErrorMessage(error))
     }
   }
 
   const handleReceive = async (): Promise<void> => {
-    if (!connection || !keyPair) {
-      return
-    }
-
     setErrorMessage('')
     setNoticeMessage('')
-
-    const advertisedMeta = getPendingFileMeta(connection.sessionId)
-    if (advertisedMeta) {
-      const accepted = window.confirm(
-        `Accept this file?\n\nName: ${advertisedMeta.name}\nSize: ${formatBytes(advertisedMeta.size)}\nType: ${formatFileType(advertisedMeta.type)}`,
-      )
-
-      if (!accepted) {
-        setNoticeMessage('Download canceled. Review file details and press Receive file when ready.')
-        return
-      }
-    }
-
     setProgress(0)
-    setStatus('transferring')
+    setIsReceivePromptBusy(true)
 
     try {
+      const nextConnection =
+        connection ??
+        ({
+          id: `receiver-${sessionId}`,
+          sessionId,
+          role: 'receiver',
+          connected: true,
+          mode: transportMode,
+        } satisfies TransferConnection)
+
+      const nextKeyPair = keyPair ?? (await generateECDHKeyPair())
+
+      if (!connection) {
+        setConnection(nextConnection)
+      }
+
+      if (!keyPair) {
+        setKeyPair(nextKeyPair)
+      }
+
+      await confirmIncomingFileReceipt(transportMode, nextConnection.sessionId)
+      setPendingRequest(null)
+      setShowReceivePrompt(false)
+      setStatus('transferring')
+
       const sessionKey = await deriveSessionKey(
-        connection.sessionId,
+        transportMode,
+        nextConnection.sessionId,
         'receiver',
-        keyPair.privateKey,
-        keyPair.publicKey,
+        nextKeyPair.privateKey,
+        nextKeyPair.publicKey,
       )
 
       if (!sessionKey) {
         throw new Error('Failed to derive session key.')
       }
 
-      const file = await receiveFile(connection, sessionKey, (nextProgress: number) => {
+      const file = await receiveFile(transportMode, nextConnection, sessionKey, (nextProgress: number) => {
         setProgress(nextProgress)
       })
 
       setReceivedFile(file)
+      dismissPendingFileMeta(transportMode, nextConnection.sessionId)
+      setPendingFileMeta(null)
+      setNoticeMessage('File received. Save it to this device.')
       setStatus('done')
     } catch (error) {
-      setStatus('error')
+      setStatus('connected')
+      setShowReceivePrompt(Boolean(pendingFileMeta))
 
       if (error instanceof Error && error.message.toLowerCase().includes('timed out waiting for sender file')) {
-        setErrorMessage('Sender has not sent the file yet. Ask sender to press Send, then press Receive file again.')
+        setErrorMessage('Sender has not finished the file send yet. Ask sender to press Send again, then accept the popup.')
         return
       }
 
       setErrorMessage('Failed to receive the file. Reconnect and try again.')
+    } finally {
+      setIsReceivePromptBusy(false)
     }
+  }
+
+  const handleDeclineReceive = (): void => {
+    if (!connection) {
+      return
+    }
+
+    try {
+      void declineIncomingFileReceipt(transportMode, connection.sessionId)
+    } catch {
+      // Keep the UI responsive even if the sender connection dropped.
+    }
+
+    dismissPendingFileMeta(transportMode, connection.sessionId)
+    setPendingFileMeta(null)
+    setShowReceivePrompt(false)
+    setNoticeMessage('Receive canceled.')
+    setErrorMessage('')
+  }
+
+  const handleDownload = (): void => {
+    setShowConfetti(true)
+    setNoticeMessage('Download started.')
   }
 
   return (
@@ -267,7 +379,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
       <header className="card-header">
         <div>
           <h2>Receiver</h2>
-          <p>Connect to sender, receive file, then save it locally.</p>
+          <p>Connect, review the file, receive it, then save it locally.</p>
         </div>
         <StatusPill status={status} />
       </header>
@@ -286,15 +398,33 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
         >
           {status === 'waiting' ? 'Waiting for approval...' : connection ? 'Reconnect' : 'Connect'}
         </button>
-        <button
-          className="btn btn-secondary"
-          type="button"
-          onClick={handleReceive}
-          disabled={!connection || !keyPair || status === 'waiting' || status === 'transferring'}
-        >
-          Receive file
-        </button>
       </div>
+
+      {showReceivePrompt && pendingFileMeta && (
+        <div className="request-modal-backdrop" role="presentation">
+          <div className="request-modal" role="dialog" aria-modal="true" aria-labelledby="receive-file-title">
+            <div className="request-head">
+              <strong id="receive-file-title">Receive this file?</strong>
+              <span className="request-alert-chip">Ready</span>
+            </div>
+            <p className="request-note">
+              Name: {pendingFileMeta.name}
+              <br />
+              Size: {formatBytes(pendingFileMeta.size)}
+              <br />
+              Type: {formatFileType(pendingFileMeta.type)}
+            </p>
+            <div className="action-row action-row--request">
+              <button className="btn btn-primary" type="button" onClick={handleReceive} disabled={isReceivePromptBusy}>
+                {isReceivePromptBusy ? 'Receiving...' : 'Receive file'}
+              </button>
+              <button className="btn btn-secondary" type="button" onClick={handleDeclineReceive} disabled={isReceivePromptBusy}>
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <ProgressBar value={stageProgress} label={stageLabel} />
 
@@ -317,7 +447,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
               {formatBytes(receivedFile.size)} | {formatFileType(receivedFile.type)}
             </span>
           </div>
-          <a className="btn btn-primary" href={downloadUrl} download={receivedFile.name}>
+          <a className="btn btn-primary" href={downloadUrl} download={receivedFile.name} onClick={handleDownload}>
             Save file
           </a>
         </div>
@@ -328,8 +458,12 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
           Request sent as <strong>{pendingRequest.receiverLabel}</strong>. Waiting for sender approval...
         </p>
       )}
-      {status === 'waiting' && !pendingRequest && <p className="message">Attempting connection...</p>}
-      {status === 'connected' && <p className="message message--success">Connected. Press Receive file.</p>}
+      {status === 'connected' && !pendingFileMeta && (
+        <p className="message message--success">Connected. Waiting for sender to choose a file.</p>
+      )}
+      {status === 'connected' && pendingFileMeta && !receivedFile && (
+        <p className="message message--success">Incoming file detected. Review the popup to accept or cancel.</p>
+      )}
       {noticeMessage && !errorMessage && <p className="message">{noticeMessage}</p>}
       {errorMessage && <p className="message message--error">{errorMessage}</p>}
     </section>

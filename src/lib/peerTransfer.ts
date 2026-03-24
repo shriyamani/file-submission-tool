@@ -1,319 +1,445 @@
-import Peer, { DataConnection } from 'peerjs'
 import {
-  type ProgressCallback,
-  type ReceivedFile,
-  type ReceiverApprovalRequest,
-  type TransferConnection,
-  type PeerRole,
-} from './transferTypes'
-import {
-  exportPublicKey,
-  importPublicKey,
-  deriveSessionKey as cryptoDeriveSessionKey,
-  encryptChunk as secureEncryptChunk,
-  decryptChunk as secureDecryptChunk,
-} from '../utils/crypto.js'
-
-export {
-  createSession,
+  approveReceiverRequest as approveMockReceiverRequest,
+  createSession as createMockSession,
+  deriveSessionKey as deriveMockSessionKey,
+  getPendingFileMeta as getMockPendingFileMeta,
   isTransferCompleted,
-  publishPendingFileMeta,
-  getPendingFileMeta,
+  publishPendingFileMeta as publishMockPendingFileMeta,
+  receiveFile as receiveMockFile,
+  rejectReceiverRequest as rejectMockReceiverRequest,
+  requestReceiverConnection as requestMockReceiverConnection,
+  sendFile as sendMockFile,
+  waitForSenderApproval as waitForMockSenderApproval,
 } from './mockTransfer'
+import type {
+  ProgressCallback,
+  ReceivedFile,
+  ReceiverApprovalRequest,
+  SessionInfo,
+  TransferConnection,
+  TransferFileMeta,
+  PeerRole,
+} from './transferTypes'
 
-// const STORAGE_KEY_PREFIX = 'beam-mock-session:'
-// const PUBKEY_POLL_INTERVAL_MS = 200
-const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
-const CHUNK_SIZE = 64 * 1024 // 64KB
+const REQUEST_POLL_INTERVAL_MS = 180
+const FILE_APPROVAL_POLL_INTERVAL_MS = 180
+const FILE_APPROVAL_TIMEOUT_MS = 90_000
+const FILE_APPROVAL_KEY_PREFIX = 'beam-file-approval:'
+const SESSION_STORAGE_KEY_PREFIX = 'beam-mock-session:'
+const BROADCAST_CHANNEL_NAME = 'beam-local-transfer'
 
-interface RequestMessage {
-  type: 'request'
-  requestId: string
-  receiverLabel: string
-}
+type FileApprovalState = 'pending' | 'approved' | 'declined'
+type ReceiverDecision = 'approved' | 'rejected'
 
-interface ApprovedMessage {
-  type: 'approved'
-}
-
-interface RejectedMessage {
-  type: 'rejected'
-}
-
-interface ChunkEnvelope {
-  type: 'chunk'
-  index: number
-  total: number
-  data: ArrayBuffer
-}
-
-interface DoneSignal {
-  type: 'done'
-  fileName: string
-  fileType: string
-  fileSize: number
-}
-
-interface PubKeyMessage {
-  type: 'pubkey'
-  role: PeerRole
-  jwk: JsonWebKey
-}
-
-type PeerMessage =
-  | RequestMessage
-  | ApprovedMessage
-  | RejectedMessage
-  | ChunkEnvelope
-  | DoneSignal
-  | PubKeyMessage
-
-const isRequestMessage = (msg: unknown): msg is RequestMessage =>
-  typeof msg === 'object' && msg !== null && (msg as RequestMessage).type === 'request'
-
-const isApprovedMessage = (msg: unknown): msg is ApprovedMessage =>
-  typeof msg === 'object' && msg !== null && (msg as ApprovedMessage).type === 'approved'
-
-const isRejectedMessage = (msg: unknown): msg is RejectedMessage =>
-  typeof msg === 'object' && msg !== null && (msg as RejectedMessage).type === 'rejected'
-
-const isChunkEnvelope = (msg: unknown): msg is ChunkEnvelope =>
-  typeof msg === 'object' && msg !== null && (msg as ChunkEnvelope).type === 'chunk'
-
-const isDoneSignal = (msg: unknown): msg is DoneSignal =>
-  typeof msg === 'object' && msg !== null && (msg as DoneSignal).type === 'done'
-
-const isPubKeyMessage = (msg: unknown): msg is PubKeyMessage =>
-  typeof msg === 'object' && msg !== null && (msg as PubKeyMessage).type === 'pubkey'
-
-let senderPeer: Peer | null = null
-let senderDataConn: DataConnection | null = null
-let receiverDataConn: DataConnection | null = null
-let pendingReceiverRequest: ReceiverApprovalRequest | null = null
-let onReceiverRequestCallback: ((request: ReceiverApprovalRequest) => void) | null = null
-let onPubKeyCallback: ((msg: PubKeyMessage) => void) | null = null
-let onReceiverPubKeyCallback: ((msg: PubKeyMessage) => void) | null = null
-let onApprovalCallback: ((msg: ApprovedMessage | RejectedMessage) => void) | null = null
-let onFileDataCallback: ((msg: ChunkEnvelope | DoneSignal) => void) | null = null
-let cachedReceiverPubKey: PubKeyMessage | null = null
-
-const delay = (ms: number): Promise<void> =>
-  new Promise((resolve) => window.setTimeout(resolve, ms))
-
-const createRandomId = (): string => {
-  const value = Math.floor(Math.random() * 10 ** 8)
-  return `beam-${value.toString(36)}`
-}
-
-const createReceiverLabel = (): string => {
-  const value = Math.floor(1000 + Math.random() * 9000)
-  return `receiver-${value}`
-}
-
-const setupReceiverDataRouter = (conn: DataConnection): void => {
-  conn.on('data', (raw) => {
-    if (isApprovedMessage(raw) || isRejectedMessage(raw)) {
-      if (onApprovalCallback) {
-        onApprovalCallback(raw as ApprovedMessage | RejectedMessage)
-      }
-    } else if (isPubKeyMessage(raw)) {
-      if (onReceiverPubKeyCallback) {
-        onReceiverPubKeyCallback(raw)
-      }
-    } else if (isChunkEnvelope(raw) || isDoneSignal(raw)) {
-      if (onFileDataCallback) {
-        onFileDataCallback(raw as ChunkEnvelope | DoneSignal)
-      }
+type BeamChannelMessage =
+  | {
+      type: 'receiver-request'
+      sessionId: string
+      request: ReceiverApprovalRequest
     }
-  })
+  | {
+      type: 'sender-response'
+      sessionId: string
+      requestId: string
+      decision: ReceiverDecision
+    }
+  | {
+      type: 'file-approval'
+      sessionId: string
+      state: FileApprovalState
+    }
+
+let senderRequestPollId: number | null = null
+let activeSenderSessionId: string | null = null
+let activeReceiverSessionId: string | null = null
+let lastPendingRequestKey: string | null = null
+let senderStorageListener: ((event: StorageEvent) => void) | null = null
+let beamChannel: BroadcastChannel | null = null
+let senderChannelListener: ((event: MessageEvent<BeamChannelMessage>) => void) | null = null
+let receiverResponseListener: ((event: MessageEvent<BeamChannelMessage>) => void) | null = null
+let receiverFileApprovalListener: ((event: MessageEvent<BeamChannelMessage>) => void) | null = null
+
+const getFileApprovalStorageKey = (sessionId: string): string => {
+  return `${FILE_APPROVAL_KEY_PREFIX}${sessionId}`
 }
 
-export const initSenderPeer = (
+const getBeamChannel = (): BroadcastChannel | null => {
+  if (typeof window.BroadcastChannel === 'undefined') {
+    return null
+  }
+
+  if (!beamChannel) {
+    beamChannel = new window.BroadcastChannel(BROADCAST_CHANNEL_NAME)
+  }
+
+  return beamChannel
+}
+
+const getSessionStorageKey = (sessionId: string): string => {
+  return `${SESSION_STORAGE_KEY_PREFIX}${sessionId}`
+}
+
+const readFileApprovalState = (sessionId: string): FileApprovalState | null => {
+  const raw = window.localStorage.getItem(getFileApprovalStorageKey(sessionId))
+
+  if (raw === 'pending' || raw === 'approved' || raw === 'declined') {
+    return raw
+  }
+
+  return null
+}
+
+const readPendingReceiverRequest = (sessionId: string): ReceiverApprovalRequest | null => {
+  try {
+    const raw = window.localStorage.getItem(getSessionStorageKey(sessionId))
+    if (!raw) {
+      return null
+    }
+
+    const parsed = JSON.parse(raw) as {
+      receiverRequest?: {
+        requestId?: unknown
+        receiverLabel?: unknown
+        requestedAt?: unknown
+        state?: unknown
+      } | null
+    }
+
+    const request = parsed.receiverRequest
+    if (!request || request.state !== 'pending') {
+      return null
+    }
+
+    if (
+      typeof request.requestId !== 'string' ||
+      typeof request.receiverLabel !== 'string' ||
+      typeof request.requestedAt !== 'number'
+    ) {
+      return null
+    }
+
+    return {
+      requestId: request.requestId,
+      receiverLabel: request.receiverLabel,
+      requestedAt: request.requestedAt,
+    }
+  } catch {
+    return null
+  }
+}
+
+const writeFileApprovalState = (sessionId: string, state: FileApprovalState | null): void => {
+  const storageKey = getFileApprovalStorageKey(sessionId)
+
+  if (!state) {
+    window.localStorage.removeItem(storageKey)
+    return
+  }
+
+  window.localStorage.setItem(storageKey, state)
+}
+
+const stopSenderRequestPolling = (): void => {
+  if (senderRequestPollId !== null) {
+    window.clearInterval(senderRequestPollId)
+    senderRequestPollId = null
+  }
+
+  if (senderStorageListener) {
+    window.removeEventListener('storage', senderStorageListener)
+    senderStorageListener = null
+  }
+
+  const channel = getBeamChannel()
+  if (channel && senderChannelListener) {
+    channel.removeEventListener('message', senderChannelListener)
+    senderChannelListener = null
+  }
+
+  lastPendingRequestKey = null
+}
+
+export const createSession = (): SessionInfo => {
+  const session = createMockSession()
+  activeSenderSessionId = session.sessionId
+  writeFileApprovalState(session.sessionId, null)
+  return {
+    ...session,
+    mode: 'local',
+  }
+}
+
+export { isTransferCompleted }
+
+export const initSenderPeer = async (
   sessionId: string,
   onRequest: (request: ReceiverApprovalRequest) => void,
 ): Promise<void> => {
-  return new Promise((resolve, reject) => {
-    if (senderPeer) {
-      senderPeer.destroy()
-      senderPeer = null
-      senderDataConn = null
+  stopSenderRequestPolling()
+  activeSenderSessionId = sessionId
+  writeFileApprovalState(sessionId, null)
+
+  const emitPendingRequest = (): void => {
+    const request = readPendingReceiverRequest(sessionId)
+
+    if (!request) {
+      lastPendingRequestKey = null
+      return
     }
 
-    onReceiverRequestCallback = onRequest
-    senderPeer = new Peer(sessionId)
+    const requestKey = `${request.requestId}:${request.requestedAt}`
+    if (requestKey === lastPendingRequestKey) {
+      return
+    }
 
-    senderPeer.on('open', (id) => {
-      console.log('[sender] PeerJS registered with ID:', id)
-      resolve()
-    })
+    lastPendingRequestKey = requestKey
+    onRequest(request)
+  }
 
-    senderPeer.on('connection', (conn) => {
-      console.log('[sender] Incoming PeerJS connection')
-      senderDataConn = conn
+  emitPendingRequest()
+  senderRequestPollId = window.setInterval(() => {
+    emitPendingRequest()
+  }, REQUEST_POLL_INTERVAL_MS)
+  senderStorageListener = (event: StorageEvent): void => {
+    if (event.key !== getSessionStorageKey(sessionId)) {
+      return
+    }
 
-      conn.on('open', () => {
-        console.log('[sender] Data channel open')
-      })
+    emitPendingRequest()
+  }
+  window.addEventListener('storage', senderStorageListener)
 
-      conn.on('data', (raw) => {
-        if (isRequestMessage(raw)) {
-          console.log('[sender] Received connection request from:', raw.receiverLabel)
-          pendingReceiverRequest = {
-            requestId: raw.requestId,
-            receiverLabel: raw.receiverLabel,
-            requestedAt: Date.now(),
-          }
-          if (onReceiverRequestCallback) {
-            onReceiverRequestCallback(pendingReceiverRequest)
-          }
-        } else if (isPubKeyMessage(raw)) {
-          if (onPubKeyCallback) {
-            onPubKeyCallback(raw)
-          } else {
-            cachedReceiverPubKey = raw
-            console.log('[sender] Cached receiver public key for later use')
-          }
-        }
-      })
+  const channel = getBeamChannel()
+  if (channel) {
+    senderChannelListener = (event: MessageEvent<BeamChannelMessage>): void => {
+      const message = event.data
+      if (message.type !== 'receiver-request' || message.sessionId !== sessionId) {
+        return
+      }
 
-      conn.on('error', (err) => {
-        console.error('[sender] Data channel error:', err)
-      })
-    })
+      const requestKey = `${message.request.requestId}:${message.request.requestedAt}`
+      if (requestKey === lastPendingRequestKey) {
+        return
+      }
 
-    senderPeer.on('error', (err) => {
-      console.error('[sender] PeerJS error:', err)
-      reject(err)
-    })
-  })
+      lastPendingRequestKey = requestKey
+      onRequest(message.request)
+    }
+
+    channel.addEventListener('message', senderChannelListener)
+  }
 }
 
 export const approveReceiverRequest = async (
   sessionId: string,
   requestId: string,
 ): Promise<TransferConnection> => {
-  if (!senderDataConn) {
-    throw new Error('No active receiver connection to approve.')
-  }
-
-  const approvedMsg: ApprovedMessage = { type: 'approved' }
-  senderDataConn.send(approvedMsg)
-  console.log('[sender] Sent approval to receiver')
-
-  pendingReceiverRequest = null
-
-  return {
-    id: `sender-${sessionId}`,
+  activeSenderSessionId = sessionId
+  const connection = await approveMockReceiverRequest(sessionId, requestId)
+  getBeamChannel()?.postMessage({
+    type: 'sender-response',
     sessionId,
-    role: 'sender',
-    connected: true,
+    requestId,
+    decision: 'approved',
+  } satisfies BeamChannelMessage)
+  return {
+    ...connection,
+    mode: 'local',
   }
 }
 
-export const rejectReceiverRequest = async (
-  sessionId: string,
-  requestId: string,
-): Promise<void> => {
-  if (!senderDataConn) {
-    return
-  }
-
-  const rejectedMsg: RejectedMessage = { type: 'rejected' }
-  senderDataConn.send(rejectedMsg)
-  console.log('[sender] Sent rejection to receiver')
-
-  senderDataConn = null
-  pendingReceiverRequest = null
+export const rejectReceiverRequest = async (sessionId: string, requestId: string): Promise<void> => {
+  await rejectMockReceiverRequest(sessionId, requestId)
+  writeFileApprovalState(sessionId, null)
+  getBeamChannel()?.postMessage({
+    type: 'sender-response',
+    sessionId,
+    requestId,
+    decision: 'rejected',
+  } satisfies BeamChannelMessage)
+  stopSenderRequestPolling()
 }
 
-export const getPendingReceiverRequest = (): ReceiverApprovalRequest | null => {
-  return pendingReceiverRequest
-}
-
-export const requestReceiverConnection = async (
-  sessionId: string,
-): Promise<ReceiverApprovalRequest> => {
-  return new Promise((resolve, reject) => {
-    if (receiverDataConn) {
-      receiverDataConn.close()
-      receiverDataConn = null
-    }
-
-    const peer = new Peer()
-
-    peer.on('open', () => {
-      console.log('[receiver] PeerJS open, connecting to sender:', sessionId)
-      const conn = peer.connect(sessionId, { reliable: true })
-      receiverDataConn = conn
-
-      conn.on('open', () => {
-        console.log('[receiver] Data channel open, sending request')
-        setupReceiverDataRouter(conn)
-
-        const request: ReceiverApprovalRequest = {
-          requestId: createRandomId(),
-          receiverLabel: createReceiverLabel(),
-          requestedAt: Date.now(),
-        }
-
-        const requestMsg: RequestMessage = {
-          type: 'request',
-          requestId: request.requestId,
-          receiverLabel: request.receiverLabel,
-        }
-
-        conn.send(requestMsg)
-        console.log('[receiver] Sent connection request as:', request.receiverLabel)
-        resolve(request)
-      })
-
-      conn.on('error', (err) => {
-        console.error('[receiver] Connection error:', err)
-        reject(err)
-      })
-    })
-
-    peer.on('error', (err) => {
-      console.error('[receiver] PeerJS error:', err)
-      reject(err)
-    })
-  })
+export const requestReceiverConnection = async (sessionId: string): Promise<ReceiverApprovalRequest> => {
+  activeReceiverSessionId = sessionId
+  const request = await requestMockReceiverConnection(sessionId)
+  getBeamChannel()?.postMessage({
+    type: 'receiver-request',
+    sessionId,
+    request,
+  } satisfies BeamChannelMessage)
+  return request
 }
 
 export const waitForSenderApproval = async (
   sessionId: string,
   requestId: string,
 ): Promise<TransferConnection> => {
+  activeReceiverSessionId = sessionId
+  const channel = getBeamChannel()
+
+  if (!channel) {
+    return waitForMockSenderApproval(sessionId, requestId)
+  }
+
   return new Promise((resolve, reject) => {
-    if (!receiverDataConn) {
-      reject(new Error('No active connection to sender.'))
-      return
+    const cleanup = (): void => {
+      if (receiverResponseListener) {
+        channel.removeEventListener('message', receiverResponseListener)
+        receiverResponseListener = null
+      }
     }
 
-    const timeout = window.setTimeout(() => {
-      onApprovalCallback = null
-      reject(new Error('Timed out waiting for sender approval.'))
-    }, 90_000)
+    receiverResponseListener = (event: MessageEvent<BeamChannelMessage>): void => {
+      const message = event.data
+      if (message.type !== 'sender-response' || message.sessionId !== sessionId || message.requestId !== requestId) {
+        return
+      }
 
-    onApprovalCallback = (msg) => {
-      if (isApprovedMessage(msg)) {
-        window.clearTimeout(timeout)
-        onApprovalCallback = null
-        console.log('[receiver] Sender approved the connection')
+      cleanup()
+
+      if (message.decision === 'approved') {
         resolve({
           id: `receiver-${sessionId}`,
           sessionId,
           role: 'receiver',
           connected: true,
+          mode: 'local',
         })
-      } else if (isRejectedMessage(msg)) {
-        window.clearTimeout(timeout)
-        onApprovalCallback = null
-        console.log('[receiver] Sender rejected the connection')
-        reject(new Error('Sender rejected the receiver request.'))
+        return
+      }
+
+      reject(new Error('Sender rejected the receiver request.'))
+    }
+
+    channel.addEventListener('message', receiverResponseListener)
+
+    waitForMockSenderApproval(sessionId, requestId)
+      .then((connection) => {
+        cleanup()
+        resolve(connection)
+      })
+      .catch((error) => {
+        cleanup()
+        reject(error)
+      })
+  })
+}
+
+export const publishPendingFileMeta = (sessionId: string, file: File | null): void => {
+  publishMockPendingFileMeta(sessionId, file)
+  writeFileApprovalState(sessionId, file ? 'pending' : null)
+}
+
+export const getPendingFileMeta = (sessionId: string): TransferFileMeta | null => {
+  return getMockPendingFileMeta(sessionId)
+}
+
+export const dismissPendingFileMeta = (sessionId: string): void => {
+  publishMockPendingFileMeta(sessionId, null)
+  writeFileApprovalState(sessionId, null)
+}
+
+export const waitForReceiverFileAcceptance = async (): Promise<void> => {
+  if (!activeSenderSessionId) {
+    throw new Error('No active sender session.')
+  }
+
+  const sessionId = activeSenderSessionId
+  const channel = getBeamChannel()
+
+  if (!channel) {
+    const timeoutAt = Date.now() + FILE_APPROVAL_TIMEOUT_MS
+
+    while (Date.now() < timeoutAt) {
+      const state = readFileApprovalState(sessionId)
+
+      if (state === 'approved') {
+        return
+      }
+
+      if (state === 'declined') {
+        throw new Error('Receiver declined the file.')
+      }
+
+      await new Promise((resolve) => {
+        window.setTimeout(resolve, FILE_APPROVAL_POLL_INTERVAL_MS)
+      })
+    }
+
+    throw new Error('Timed out waiting for receiver file approval.')
+  }
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(() => {
+      cleanup()
+      reject(new Error('Timed out waiting for receiver file approval.'))
+    }, FILE_APPROVAL_TIMEOUT_MS)
+
+    const cleanup = (): void => {
+      window.clearTimeout(timeoutId)
+      if (receiverFileApprovalListener) {
+        channel.removeEventListener('message', receiverFileApprovalListener)
+        receiverFileApprovalListener = null
       }
     }
+
+    const settleFromState = (state: FileApprovalState | null): boolean => {
+      if (state === 'approved') {
+        cleanup()
+        resolve()
+        return true
+      }
+
+      if (state === 'declined') {
+        cleanup()
+        reject(new Error('Receiver declined the file.'))
+        return true
+      }
+
+      return false
+    }
+
+    if (settleFromState(readFileApprovalState(sessionId))) {
+      return
+    }
+
+    receiverFileApprovalListener = (event: MessageEvent<BeamChannelMessage>): void => {
+      const message = event.data
+      if (message.type !== 'file-approval' || message.sessionId !== sessionId) {
+        return
+      }
+
+      settleFromState(message.state)
+    }
+
+    channel.addEventListener('message', receiverFileApprovalListener)
   })
+}
+
+export const confirmIncomingFileReceipt = (sessionId?: string): void => {
+  const resolvedSessionId = sessionId ?? activeReceiverSessionId
+
+  if (!resolvedSessionId) {
+    throw new Error('No active receiver session.')
+  }
+
+  activeReceiverSessionId = resolvedSessionId
+  writeFileApprovalState(resolvedSessionId, 'approved')
+  getBeamChannel()?.postMessage({
+    type: 'file-approval',
+    sessionId: resolvedSessionId,
+    state: 'approved',
+  } satisfies BeamChannelMessage)
+}
+
+export const declineIncomingFileReceipt = (sessionId: string): void => {
+  writeFileApprovalState(sessionId, 'declined')
+  getBeamChannel()?.postMessage({
+    type: 'file-approval',
+    sessionId,
+    state: 'declined',
+  } satisfies BeamChannelMessage)
 }
 
 export const deriveSessionKey = async (
@@ -322,69 +448,7 @@ export const deriveSessionKey = async (
   privateKey: CryptoKey,
   publicKey: CryptoKey,
 ): Promise<CryptoKey | null> => {
-  const conn = role === 'sender' ? senderDataConn : receiverDataConn
-
-  if (!conn) {
-    throw new Error(`No active ${role} connection for key exchange.`)
-  }
-
-  const otherRole: PeerRole = role === 'sender' ? 'receiver' : 'sender'
-
-  const otherJwkPromise = new Promise<JsonWebKey>((resolve, reject) => {
-    const timeout = window.setTimeout(() => {
-      onPubKeyCallback = null
-      reject(new Error(`Timed out waiting for ${otherRole} public key.`))
-    }, PUBKEY_EXCHANGE_TIMEOUT_MS)
-
-    if (role === 'sender') {
-      if (cachedReceiverPubKey && cachedReceiverPubKey.role === otherRole) {
-        console.log(`[sender] Using cached public key from receiver`)
-        const jwk = cachedReceiverPubKey.jwk
-        cachedReceiverPubKey = null
-        window.clearTimeout(timeout)
-        resolve(jwk)
-        return
-      }
-
-      onPubKeyCallback = (msg: PubKeyMessage) => {
-        if (msg.role === otherRole) {
-          window.clearTimeout(timeout)
-          onPubKeyCallback = null
-          cachedReceiverPubKey = null
-          console.log(`[${role}] Received public key from ${otherRole}`)
-          resolve(msg.jwk)
-        }
-      }
-    } else {
-      onReceiverPubKeyCallback = (msg: PubKeyMessage) => {
-        if (msg.role === otherRole) {
-          window.clearTimeout(timeout)
-          onReceiverPubKeyCallback = null
-          console.log(`[${role}] Received public key from ${otherRole}`)
-          resolve(msg.jwk)
-        }
-      }
-    }
-  })
-
-  const ownJwk = await exportPublicKey(publicKey)
-  const pubKeyMsg: PubKeyMessage = {
-    type: 'pubkey',
-    role,
-    jwk: ownJwk,
-  }
-  conn.send(pubKeyMsg)
-  console.log(`[${role}] Sent public key to peer`)
-
-  const otherJwk = await otherJwkPromise
-
-  const otherPublicKey = await importPublicKey(otherJwk)
-  const sessionKey = await cryptoDeriveSessionKey(privateKey, otherPublicKey)
-
-  const exported = await window.crypto.subtle.exportKey('raw', sessionKey)
-  console.log(`[${role}] derived key:`, new Uint8Array(exported).toString())
-
-  return sessionKey
+  return deriveMockSessionKey(sessionId, role, privateKey, publicKey)
 }
 
 export const sendFile = async (
@@ -393,55 +457,7 @@ export const sendFile = async (
   sessionKey: CryptoKey,
   onProgress: ProgressCallback,
 ): Promise<void> => {
-  if (!connection.connected) {
-    throw new Error('Connection is not active.')
-  }
-
-  if (!senderDataConn) {
-    throw new Error('No active PeerJS data connection.')
-  }
-
-  const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
-  let offset = 0
-  let chunkIndex = 0
-
-  onProgress(0)
-
-  while (offset < file.size) {
-    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE)
-    const chunkBuffer = await chunkBlob.arrayBuffer()
-
-    const encryptedBuffer = await secureEncryptChunk(chunkBuffer, sessionKey)
-
-    const envelope: ChunkEnvelope = {
-      type: 'chunk',
-      index: chunkIndex,
-      total: totalChunks,
-      data: encryptedBuffer,
-    }
-    senderDataConn.send(envelope)
-
-    offset += CHUNK_SIZE
-    chunkIndex++
-    onProgress(Math.round((chunkIndex / totalChunks) * 100))
-    await delay(10)
-  }
-
-  const doneSignal: DoneSignal = {
-    type: 'done',
-    fileName: file.name,
-    fileType: file.type || 'application/octet-stream',
-    fileSize: file.size,
-  }
-  senderDataConn.send(doneSignal)
-
-  console.log('[sender] All chunks sent, done signal dispatched')
-
-  await delay(500)
-  senderDataConn.close()
-  senderPeer?.destroy()
-  senderPeer = null
-  senderDataConn = null
+  await sendMockFile(connection, file, sessionKey, onProgress)
 }
 
 export const receiveFile = async (
@@ -449,68 +465,5 @@ export const receiveFile = async (
   sessionKey: CryptoKey,
   onProgress: ProgressCallback,
 ): Promise<ReceivedFile> => {
-  if (!connection.connected) {
-    throw new Error('Connection is not active.')
-  }
-
-  if (!receiverDataConn) {
-    throw new Error('No active PeerJS data connection.')
-  }
-
-  return new Promise((resolve, reject) => {
-    const receivedChunks = new Map<number, ArrayBuffer>()
-    let fileMeta: DoneSignal | null = null
-
-    onProgress(2)
-
-    onFileDataCallback = async (raw) => {
-      try {
-        if (isDoneSignal(raw)) {
-          fileMeta = raw
-          onFileDataCallback = null
-          const totalChunks = receivedChunks.size
-          const decryptedBlobs: Blob[] = []
-
-          for (let i = 0; i < totalChunks; i++) {
-            const encryptedChunk = receivedChunks.get(i)
-            if (!encryptedChunk) {
-              reject(new Error(`Missing chunk at index ${i}`))
-              return
-            }
-            const decryptedBuffer = await secureDecryptChunk(encryptedChunk, sessionKey)
-            decryptedBlobs.push(new Blob([decryptedBuffer]))
-          }
-
-          console.log(`Decrypted ${totalChunks} chunks successfully`)
-
-          const finalBlob = new Blob(decryptedBlobs, { type: fileMeta.fileType })
-
-          resolve({
-            name: fileMeta.fileName,
-            size: finalBlob.size,
-            type: fileMeta.fileType,
-            blob: finalBlob,
-          })
-
-        } else if (isChunkEnvelope(raw)) {
-          receivedChunks.set(raw.index, raw.data)
-          onProgress(Math.round((receivedChunks.size / raw.total) * 100))
-        }
-      } catch (err) {
-        onFileDataCallback = null
-        reject(err)
-      }
-    }
-
-    receiverDataConn!.on('error', (err) => {
-      console.error('[receiver] data connection error:', err)
-      reject(err)
-    })
-
-    receiverDataConn!.on('close', () => {
-      if (!fileMeta) {
-        reject(new Error('Connection closed before transfer completed.'))
-      }
-    })
-  })
+  return receiveMockFile(connection, sessionKey, onProgress)
 }
