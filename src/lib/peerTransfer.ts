@@ -26,6 +26,30 @@ export {
 const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
 const CHUNK_SIZE = 64 * 1024 // 64KB
 
+const PEER_CONFIG = {
+  config: {
+    iceServers: [
+      { urls: 'stun:stun.l.google.com:19302' },
+      { urls: 'stun:stun1.l.google.com:19302' },
+      {
+        urls: 'turn:openrelay.metered.ca:80',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+      {
+        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
+        username: 'openrelayproject',
+        credential: 'openrelayproject',
+      },
+    ],
+  },
+}
+
 interface RequestMessage {
   type: 'request'
   requestId: string
@@ -140,7 +164,7 @@ export const initSenderPeer = (
     }
 
     onReceiverRequestCallback = onRequest
-    senderPeer = new Peer(sessionId)
+    senderPeer = new Peer(sessionId, PEER_CONFIG)
 
     senderPeer.on('open', (id) => {
       console.log('[sender] PeerJS registered with ID:', id)
@@ -184,6 +208,14 @@ export const initSenderPeer = (
     senderPeer.on('error', (err) => {
       console.error('[sender] PeerJS error:', err)
       reject(err)
+    })
+
+    senderPeer.on('disconnected', () => {
+      console.warn('[sender] PeerJS disconnected from signaling server')
+    })
+
+    senderPeer.on('close', () => {
+      console.warn('[sender] PeerJS connection closed')
     })
   })
 }
@@ -239,7 +271,7 @@ export const requestReceiverConnection = async (
       receiverDataConn = null
     }
 
-    const peer = new Peer()
+    const peer = new Peer(PEER_CONFIG)
 
     peer.on('open', () => {
       console.log('[receiver] PeerJS open, connecting to sender:', sessionId)
@@ -276,6 +308,10 @@ export const requestReceiverConnection = async (
     peer.on('error', (err) => {
       console.error('[receiver] PeerJS error:', err)
       reject(err)
+    })
+
+    peer.on('disconnected', () => {
+      console.warn('[receiver] PeerJS disconnected from signaling server')
     })
   })
 }
