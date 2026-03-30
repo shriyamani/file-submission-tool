@@ -29,22 +29,28 @@ const CHUNK_SIZE = 64 * 1024 // 64KB
 const PEER_CONFIG = {
   config: {
     iceServers: [
-      { urls: 'stun:stun.l.google.com:19302' },
-      { urls: 'stun:stun1.l.google.com:19302' },
       {
-        urls: 'turn:openrelay.metered.ca:80',
-        username: 'openrelayproject',
-        credential: 'openrelayproject',
+        urls: 'stun:stun.relay.metered.ca:80',
       },
       {
-        urls: 'turn:openrelay.metered.ca:443',
-        username: 'openrelayproject',
-        credential: 'openrelayproject',
+        urls: 'turn:global.relay.metered.ca:80',
+        username: 'e6a6ef99abba0455118bdf45',
+        credential: 'JTR4jUC/RBCd6Ed3',
       },
       {
-        urls: 'turn:openrelay.metered.ca:443?transport=tcp',
-        username: 'openrelayproject',
-        credential: 'openrelayproject',
+        urls: 'turn:global.relay.metered.ca:80?transport=tcp',
+        username: 'e6a6ef99abba0455118bdf45',
+        credential: 'JTR4jUC/RBCd6Ed3',
+      },
+      {
+        urls: 'turn:global.relay.metered.ca:443',
+        username: 'e6a6ef99abba0455118bdf45',
+        credential: 'JTR4jUC/RBCd6Ed3',
+      },
+      {
+        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
+        username: 'e6a6ef99abba0455118bdf45',
+        credential: 'JTR4jUC/RBCd6Ed3',
       },
     ],
   },
