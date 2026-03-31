@@ -111,6 +111,16 @@ const FAQ_ITEMS = [
     answer:
       'No. Beam is designed around a direct sender-to-receiver handoff with approval and receiver confirmation, not a public browsing page for uploaded files.',
   },
+  {
+    question: 'Which file formats does Beam support?',
+    answer:
+      'Beam supports any file format: documents, images, videos, archives, or apps. Since the transfer happens as a binary stream, the tool stays format-agnostic.',
+  },
+  {
+    question: 'Can I send a folder?',
+    answer:
+      'Beam handles single files per transfer. To send a folder, compress it into a .zip file first to preserve its internal structure.',
+  },
 ]
 
 const readSessionIdFromLocation = (): string | null => {
