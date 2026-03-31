@@ -84,6 +84,14 @@ interface DoneSignal {
   fileSize: number
 }
 
+interface ReceiverReadyMessage {
+  type: 'receiver-ready'
+}
+
+interface ReceiverCompleteMessage {
+  type: 'receiver-complete'
+}
+
 interface PubKeyMessage {
   type: 'pubkey'
   role: PeerRole
@@ -96,6 +104,8 @@ type PeerMessage =
   | RejectedMessage
   | ChunkEnvelope
   | DoneSignal
+  | ReceiverReadyMessage
+  | ReceiverCompleteMessage
   | PubKeyMessage
 
 const isRequestMessage = (msg: unknown): msg is RequestMessage =>
@@ -113,6 +123,12 @@ const isChunkEnvelope = (msg: unknown): msg is ChunkEnvelope =>
 const isDoneSignal = (msg: unknown): msg is DoneSignal =>
   typeof msg === 'object' && msg !== null && (msg as DoneSignal).type === 'done'
 
+const isReceiverReadyMessage = (msg: unknown): msg is ReceiverReadyMessage =>
+  typeof msg === 'object' && msg !== null && (msg as ReceiverReadyMessage).type === 'receiver-ready'
+
+const isReceiverCompleteMessage = (msg: unknown): msg is ReceiverCompleteMessage =>
+  typeof msg === 'object' && msg !== null && (msg as ReceiverCompleteMessage).type === 'receiver-complete'
+
 const isPubKeyMessage = (msg: unknown): msg is PubKeyMessage =>
   typeof msg === 'object' && msg !== null && (msg as PubKeyMessage).type === 'pubkey'
 
@@ -125,7 +141,26 @@ let onPubKeyCallback: ((msg: PubKeyMessage) => void) | null = null
 let onReceiverPubKeyCallback: ((msg: PubKeyMessage) => void) | null = null
 let onApprovalCallback: ((msg: ApprovedMessage | RejectedMessage) => void) | null = null
 let onFileDataCallback: ((msg: ChunkEnvelope | DoneSignal) => void) | null = null
+let onReceiverReadyCallback: (() => void) | null = null
+let onReceiverCompleteCallback: (() => void) | null = null
 let cachedReceiverPubKey: PubKeyMessage | null = null
+let cachedReceiverReady = false
+let senderCleanupTimeoutId: number | null = null
+
+const cleanupSenderConnection = (): void => {
+  if (senderCleanupTimeoutId !== null) {
+    window.clearTimeout(senderCleanupTimeoutId)
+    senderCleanupTimeoutId = null
+  }
+
+  cachedReceiverReady = false
+  onReceiverReadyCallback = null
+  onReceiverCompleteCallback = null
+  senderDataConn?.close()
+  senderPeer?.destroy()
+  senderPeer = null
+  senderDataConn = null
+}
 
 const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, ms))
@@ -164,12 +199,13 @@ export const initSenderPeer = (
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
     if (senderPeer) {
-      senderPeer.destroy()
-      senderPeer = null
-      senderDataConn = null
+      cleanupSenderConnection()
     }
 
     onReceiverRequestCallback = onRequest
+    onReceiverReadyCallback = null
+    onReceiverCompleteCallback = null
+    cachedReceiverReady = false
     senderPeer = new Peer(sessionId, PEER_CONFIG)
 
     senderPeer.on('open', (id) => {
@@ -195,6 +231,17 @@ export const initSenderPeer = (
           }
           if (onReceiverRequestCallback) {
             onReceiverRequestCallback(pendingReceiverRequest)
+          }
+        } else if (isReceiverReadyMessage(raw)) {
+          if (onReceiverReadyCallback) {
+            cachedReceiverReady = false
+            onReceiverReadyCallback()
+          } else {
+            cachedReceiverReady = true
+          }
+        } else if (isReceiverCompleteMessage(raw)) {
+          if (onReceiverCompleteCallback) {
+            onReceiverCompleteCallback()
           }
         } else if (isPubKeyMessage(raw)) {
           if (onPubKeyCallback) {
@@ -429,6 +476,30 @@ export const deriveSessionKey = async (
   return sessionKey
 }
 
+export const subscribeToReceiverReady = (onReady: () => void): (() => void) => {
+  onReceiverReadyCallback = onReady
+
+  if (cachedReceiverReady) {
+    cachedReceiverReady = false
+    onReady()
+  }
+
+  return () => {
+    if (onReceiverReadyCallback === onReady) {
+      onReceiverReadyCallback = null
+    }
+  }
+}
+
+export const notifySenderReceiverReady = async (): Promise<void> => {
+  if (!receiverDataConn) {
+    throw new Error('No active PeerJS data connection.')
+  }
+
+  const readyMessage: ReceiverReadyMessage = { type: 'receiver-ready' }
+  receiverDataConn.send(readyMessage)
+}
+
 export const sendFile = async (
   connection: TransferConnection,
   file: File,
@@ -479,16 +550,27 @@ export const sendFile = async (
 
   console.log('[sender] All chunks sent, done signal dispatched')
 
-  await delay(500)
-  senderDataConn.close()
-  senderPeer?.destroy()
-  senderPeer = null
-  senderDataConn = null
+  const finishCleanup = (): void => {
+    cleanupSenderConnection()
+  }
+
+  onReceiverCompleteCallback = () => {
+    finishCleanup()
+  }
+
+  if (senderCleanupTimeoutId !== null) {
+    window.clearTimeout(senderCleanupTimeoutId)
+  }
+
+  // Keep the channel open briefly so the receiver can confirm completion on slower networks.
+  senderCleanupTimeoutId = window.setTimeout(() => {
+    finishCleanup()
+  }, 15_000)
 }
 
 export const receiveFile = async (
   connection: TransferConnection,
-  sessionKey: CryptoKey,
+  sessionKey: CryptoKey | Promise<CryptoKey | null> | null,
   onProgress: ProgressCallback,
 ): Promise<ReceivedFile> => {
   if (!connection.connected) {
@@ -502,6 +584,12 @@ export const receiveFile = async (
   return new Promise((resolve, reject) => {
     const receivedChunks = new Map<number, ArrayBuffer>()
     let fileMeta: DoneSignal | null = null
+    const sessionKeyPromise = Promise.resolve(sessionKey)
+
+    sessionKeyPromise.catch((error) => {
+      onFileDataCallback = null
+      reject(error)
+    })
 
     onProgress(2)
 
@@ -512,6 +600,12 @@ export const receiveFile = async (
           onFileDataCallback = null
           const totalChunks = receivedChunks.size
           const decryptedBlobs: Blob[] = []
+          const resolvedSessionKey = await sessionKeyPromise
+
+          if (!resolvedSessionKey) {
+            reject(new Error('Failed to derive session key.'))
+            return
+          }
 
           for (let i = 0; i < totalChunks; i++) {
             const encryptedChunk = receivedChunks.get(i)
@@ -519,13 +613,20 @@ export const receiveFile = async (
               reject(new Error(`Missing chunk at index ${i}`))
               return
             }
-            const decryptedBuffer = await secureDecryptChunk(encryptedChunk, sessionKey)
+            const decryptedBuffer = await secureDecryptChunk(encryptedChunk, resolvedSessionKey)
             decryptedBlobs.push(new Blob([decryptedBuffer]))
           }
 
           console.log(`Decrypted ${totalChunks} chunks successfully`)
 
           const finalBlob = new Blob(decryptedBlobs, { type: fileMeta.fileType })
+
+          try {
+            const completeMessage: ReceiverCompleteMessage = { type: 'receiver-complete' }
+            receiverDataConn?.send(completeMessage)
+          } catch (error) {
+            console.warn('[receiver] Could not confirm transfer completion to sender:', error)
+          }
 
           resolve({
             name: fileMeta.fileName,

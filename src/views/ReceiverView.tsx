@@ -8,6 +8,7 @@ import {
   requestReceiverConnection, 
   waitForSenderApproval,
   deriveSessionKey,
+  notifySenderReceiverReady,
 } from '../lib/peerTransfer'
 import { generateECDHKeyPair } from '../utils/crypto'
 import {
@@ -71,6 +72,8 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
   const [errorMessage, setErrorMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
   const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null)
+  const [showApprovalPrompt, setShowApprovalPrompt] = useState(false)
+  const shouldShowProgress = status !== 'idle' && (status !== 'done' || showConfetti)
 
   const stageProgress = useMemo(() => {
     if (status === 'done') {
@@ -172,26 +175,32 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     setConnection(null)
     setPendingRequest(null)
     setStatus('waiting')
+    setShowApprovalPrompt(false)
 
     try {
       const request = await requestReceiverConnection(sessionId)
       setPendingRequest(request)
 
       const receiverConnection = await waitForSenderApproval(sessionId, request.requestId)
-      setConnection(receiverConnection)
-      setPendingRequest(null)
-      setStatus('connected')
 
       try {
         const generatedKeys = await generateECDHKeyPair()
         setKeyPair(generatedKeys)
+        setConnection(receiverConnection)
+        setPendingRequest(null)
+        setStatus('connected')
+        setNoticeMessage('Sender approved. Press Receive file when you are ready.')
+        setShowApprovalPrompt(true)
       } catch (err) {
+        setConnection(null)
+        setPendingRequest(null)
         setStatus('error')
         setErrorMessage('Failed to generate encryption keys. Press Connect and try again.')
       }
     } catch (error) {
       setStatus('error')
       setPendingRequest(null)
+      setShowApprovalPrompt(false)
 
       if (error instanceof Error && error.message.toLowerCase().includes('rejected')) {
         setErrorMessage('Sender rejected your connection request. Ask them to approve and try again.')
@@ -214,6 +223,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
     setErrorMessage('')
     setNoticeMessage('')
+    setShowApprovalPrompt(false)
 
     const advertisedMeta = getPendingFileMeta(connection.sessionId)
     if (advertisedMeta) {
@@ -231,22 +241,24 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
     setStatus('transferring')
 
     try {
-      const sessionKey = await deriveSessionKey(
+      const sessionKeyPromise = deriveSessionKey(
         connection.sessionId,
         'receiver',
         keyPair.privateKey,
         keyPair.publicKey,
       )
 
-      if (!sessionKey) {
-        throw new Error('Failed to derive session key.')
-      }
-
-      const file = await receiveFile(connection, sessionKey, (nextProgress: number) => {
+      const receivePromise = receiveFile(connection, sessionKeyPromise, (nextProgress: number) => {
         setProgress(nextProgress)
       })
 
+      await notifySenderReceiverReady()
+      setNoticeMessage('Sender notified. Waiting for them to press Send.')
+
+      const file = await receivePromise
+
       setReceivedFile(file)
+      setNoticeMessage('')
       setStatus('done')
     } catch (error) {
       setStatus('error')
@@ -296,7 +308,41 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
         </button>
       </div>
 
-      <ProgressBar value={stageProgress} label={stageLabel} />
+      {showApprovalPrompt && connection && (
+        <div className="request-modal-backdrop" role="presentation">
+          <div
+            className="request-modal request-modal--info"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="sender-approved-title"
+          >
+            <div className="request-head request-head--neutral">
+              <strong id="sender-approved-title">Sender approved your request</strong>
+              <span className="request-alert-chip request-alert-chip--info">Ready to receive</span>
+            </div>
+            <p className="request-note request-note--neutral">
+              Press Receive file on the transfer page when you are ready to receive.
+            </p>
+            {pendingFileMeta && (
+              <div className="download-box">
+                <div>
+                  <strong>{pendingFileMeta.name}</strong>
+                  <span>
+                    {formatBytes(pendingFileMeta.size)} | {formatFileType(pendingFileMeta.type)}
+                  </span>
+                </div>
+              </div>
+            )}
+            <div className="action-row action-row--request">
+              <button className="btn btn-primary" type="button" onClick={() => setShowApprovalPrompt(false)}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {shouldShowProgress && <ProgressBar value={stageProgress} label={stageLabel} />}
 
       {pendingFileMeta && status !== 'done' && (
         <div className="download-box">
@@ -323,13 +369,9 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
         </div>
       )}
 
-      {status === 'waiting' && pendingRequest && (
-        <p className="message">
-          Request sent as <strong>{pendingRequest.receiverLabel}</strong>. Waiting for sender approval...
-        </p>
-      )}
+      {status === 'waiting' && pendingRequest && <p className="message">Waiting for sender approval...</p>}
       {status === 'waiting' && !pendingRequest && <p className="message">Attempting connection...</p>}
-      {status === 'connected' && <p className="message message--success">Connected. Press Receive file.</p>}
+      {status === 'connected' && <p className="message message--success">Sender approved. Press Receive file.</p>}
       {noticeMessage && !errorMessage && <p className="message">{noticeMessage}</p>}
       {errorMessage && <p className="message message--error">{errorMessage}</p>}
     </section>

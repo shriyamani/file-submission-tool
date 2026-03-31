@@ -4,6 +4,7 @@ interface DropzoneProps {
   file: File | null
   disabled?: boolean
   onFileSelected: (file: File) => void
+  onFileRemoved?: () => void
 }
 
 const formatBytes = (bytes: number): string => {
@@ -23,7 +24,19 @@ const formatBytes = (bytes: number): string => {
   return `${value.toFixed(1)} ${units[unitIndex]}`
 }
 
-const Dropzone = ({ file, disabled = false, onFileSelected }: DropzoneProps) => {
+const TrashIcon = () => {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M3 6h18" />
+      <path d="M8 6V4.8C8 4.36 8.36 4 8.8 4h6.4c.44 0 .8.36.8.8V6" />
+      <path d="M6.8 6l.8 12.2c.03.42.38.8.8.8h7.2c.42 0 .77-.38.8-.8L17.2 6" />
+      <path d="M10 10.2v5.6" />
+      <path d="M14 10.2v5.6" />
+    </svg>
+  )
+}
+
+const Dropzone = ({ file, disabled = false, onFileSelected, onFileRemoved }: DropzoneProps) => {
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [dragActive, setDragActive] = useState(false)
 
@@ -98,7 +111,23 @@ const Dropzone = ({ file, disabled = false, onFileSelected }: DropzoneProps) => 
       {file && (
         <div className="dropzone-file">
           <strong>{file.name}</strong>
-          <span>{formatBytes(file.size)}</span>
+          <div className="dropzone-file__meta">
+            <span>{formatBytes(file.size)}</span>
+            {onFileRemoved && (
+              <button
+                className="dropzone-remove"
+                type="button"
+                disabled={disabled}
+                aria-label="Remove selected file"
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onFileRemoved()
+                }}
+              >
+                <TrashIcon />
+              </button>
+            )}
+          </div>
         </div>
       )}
     </div>

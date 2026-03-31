@@ -11,6 +11,7 @@ import {
   rejectReceiverRequest,
   sendFile,
   deriveSessionKey,
+  subscribeToReceiverReady,
 } from '../lib/peerTransfer'
 import { generateECDHKeyPair } from '../utils/crypto'
 import {
@@ -32,10 +33,13 @@ const SenderView = () => {
   const [noticeMessage, setNoticeMessage] = useState('')
   const [showConfetti, setShowConfetti] = useState(false)
   const [keyPair, setKeyPair] = useState<CryptoKeyPair | null>(null)
+  const [receiverReady, setReceiverReady] = useState(false)
+  const [showReadyPrompt, setShowReadyPrompt] = useState(false)
 
   const shouldWarnBeforeClose = Boolean(
     session && (status === 'waiting' || status === 'connected' || status === 'transferring' || pendingReceiver),
   )
+  const shouldShowProgress = Boolean(session && status !== 'idle' && (status !== 'done' || showConfetti))
 
   const stageProgress = useMemo(() => {
     if (status === 'done') {
@@ -47,6 +51,10 @@ const SenderView = () => {
     }
 
     if (status === 'connected') {
+      if (receiverReady) {
+        return Math.max(82, Math.round(progress))
+      }
+
       return Math.max(66, Math.round(progress))
     }
 
@@ -59,7 +67,7 @@ const SenderView = () => {
     }
 
     return 0
-  }, [pendingReceiver, progress, session, status])
+  }, [pendingReceiver, progress, receiverReady, session, status])
 
   const stageLabel = useMemo(() => {
     if (status === 'done') {
@@ -75,7 +83,11 @@ const SenderView = () => {
         return 'Upload sent. Waiting for receiver download confirmation'
       }
 
-      return 'Receiver approved. Ready to send'
+      if (receiverReady) {
+        return 'Receiver confirmed Receive file. Ready to send'
+      }
+
+      return 'Waiting for receiver to confirm Receive file'
     }
 
     if (pendingReceiver) {
@@ -87,7 +99,7 @@ const SenderView = () => {
     }
 
     return 'Generate a share link to start'
-  }, [pendingReceiver, session, status])
+  }, [pendingReceiver, progress, receiverReady, session, status])
 
   useEffect(() => {
     if (!shouldWarnBeforeClose) {
@@ -120,11 +132,43 @@ const SenderView = () => {
     }
   }, [status])
 
+  useEffect(() => {
+    if (status !== 'connected' || !receiverReady) {
+      return
+    }
+
+    setShowReadyPrompt(true)
+
+    if (!file) {
+      setNoticeMessage('Receiver is ready, but you still need to choose a file before Send can be enabled.')
+      return
+    }
+
+    if (!keyPair) {
+      setNoticeMessage('Receiver is ready. Beam is still preparing secure send on this page.')
+      return
+    }
+
+    setNoticeMessage('')
+  }, [file, keyPair, receiverReady, status])
+
+  useEffect(() => {
+    if (!session || status !== 'connected') {
+      return
+    }
+
+    return subscribeToReceiverReady(() => {
+      setReceiverReady(true)
+    })
+  }, [session, status])
+
   const handleCreateSession = async (): Promise<void> => {
     setErrorMessage('')
     setNoticeMessage('')
     setProgress(0)
     setCopyState('idle')
+    setReceiverReady(false)
+    setShowReadyPrompt(false)
 
     const nextSession = createSession()
     if (file) {
@@ -147,6 +191,8 @@ const SenderView = () => {
         setPendingReceiver(request)
         setConnection(null)
         setStatus('waiting')
+        setReceiverReady(false)
+        setShowReadyPrompt(false)
         setErrorMessage('')
         setNoticeMessage('Receiver pressed Connect. Approve or reject first.')
       })
@@ -161,7 +207,6 @@ const SenderView = () => {
       return
     }
 
-    const receiverLabel = pendingReceiver.receiverLabel
     setErrorMessage('')
 
     try {
@@ -169,10 +214,12 @@ const SenderView = () => {
       setConnection(senderConnection)
       setPendingReceiver(null)
       setStatus('connected')
+      setReceiverReady(false)
+      setShowReadyPrompt(false)
       setProgress((current) => {
         return Math.max(current, 66)
       })
-      setNoticeMessage(`${receiverLabel} approved. Ready to send.`)
+      setNoticeMessage('')
     } catch {
       setPendingReceiver(null)
       setConnection(null)
@@ -195,6 +242,8 @@ const SenderView = () => {
       setPendingReceiver(null)
       setConnection(null)
       setStatus('waiting')
+      setReceiverReady(false)
+      setShowReadyPrompt(false)
       setNoticeMessage(`${receiverLabel} rejected. Waiting for another receiver request.`)
     } catch {
       setStatus('error')
@@ -203,13 +252,33 @@ const SenderView = () => {
   }
 
   const handleSend = async (): Promise<void> => {
-    if (!file || !connection || !keyPair || !session) {
+    if (!file || !session) {
+      setErrorMessage('Choose a file and generate a share link first.')
       return
+    }
+
+    if (!receiverReady || status !== 'connected' || pendingReceiver) {
+      setErrorMessage('Wait for the receiver to press Receive file before sending.')
+      return
+    }
+
+    if (!keyPair) {
+      setErrorMessage('Security setup is still loading. Wait a moment and try Send again.')
+      return
+    }
+
+    const activeConnection: TransferConnection = connection ?? {
+      id: `sender-${session.sessionId}`,
+      sessionId: session.sessionId,
+      role: 'sender',
+      connected: true,
     }
 
     setErrorMessage('')
     setNoticeMessage('')
     setStatus('transferring')
+    setShowReadyPrompt(false)
+    setConnection(activeConnection)
 
     try {
       const sessionKey = await deriveSessionKey(
@@ -223,15 +292,19 @@ const SenderView = () => {
         throw new Error('Failed to derive session key.')
       }
 
-      await sendFile(connection, file, sessionKey, (nextProgress: number) => {
+      await sendFile(activeConnection, file, sessionKey, (nextProgress: number) => {
         setProgress(nextProgress)
       })
 
       setProgress(100)
       setStatus('done')
-      setNoticeMessage('File sent successfully.')
+      setReceiverReady(false)
+      setShowReadyPrompt(false)
+      setNoticeMessage('')
     } catch {
       setStatus('error')
+      setReceiverReady(false)
+      setShowReadyPrompt(false)
       setErrorMessage('Transfer failed. Generate a new session and retry.')
     }
   }
@@ -249,8 +322,8 @@ const SenderView = () => {
     }
   }
 
-  const canGenerate = status !== 'transferring'
-  const canSend = Boolean(file && connection && status !== 'transferring' && !pendingReceiver && progress < 90)
+  const canGenerate = Boolean(file) && status !== 'transferring'
+  const canSend = Boolean(file && session && keyPair && receiverReady && status === 'connected' && !pendingReceiver && progress < 90)
 
   return (
     <section className="beam-card">
@@ -270,6 +343,32 @@ const SenderView = () => {
 
           if (session) {
             publishPendingFileMeta(session.sessionId, nextFile)
+            setReceiverReady(false)
+            setShowReadyPrompt(false)
+          }
+
+          if (connection) {
+            setStatus('connected')
+            return
+          }
+
+          if (session) {
+            setStatus('waiting')
+            return
+          }
+
+          setStatus('idle')
+        }}
+        onFileRemoved={() => {
+          setFile(null)
+          setProgress(0)
+          setErrorMessage('')
+          setReceiverReady(false)
+          setShowReadyPrompt(false)
+          setNoticeMessage('File removed. Choose another file before sending.')
+
+          if (session) {
+            publishPendingFileMeta(session.sessionId, null)
           }
 
           if (connection) {
@@ -318,6 +417,33 @@ const SenderView = () => {
         </div>
       )}
 
+      {showReadyPrompt && status === 'connected' && receiverReady && !pendingReceiver && (
+        <div className="request-modal-backdrop" role="presentation">
+          <div className="request-modal request-modal--info" role="dialog" aria-modal="true" aria-labelledby="receiver-ready-title">
+            <div className="request-head request-head--neutral">
+              <strong id="receiver-ready-title">
+                {canSend ? 'Receiver is ready to receive the file' : 'Receiver is ready'}
+              </strong>
+              <span className="request-alert-chip request-alert-chip--info">
+                {canSend ? 'Send enabled' : 'Action needed'}
+              </span>
+            </div>
+            <p className="request-note request-note--neutral">
+              {canSend
+                ? 'Click Send on the transfer page when you are ready.'
+                : !file
+                  ? 'The receiver is waiting. Choose a file on this page first, then click Send on the transfer page.'
+                  : 'The receiver is waiting. Beam is still preparing secure send on this page.'}
+            </p>
+            <div className="action-row action-row--request">
+              <button className="btn btn-primary" type="button" onClick={() => setShowReadyPrompt(false)}>
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {session && (
         <div className="share-box">
           <div className="share-head">
@@ -340,15 +466,22 @@ const SenderView = () => {
         </div>
       )}
 
-      {session && <ProgressBar value={stageProgress} label={stageLabel} />}
+      {shouldShowProgress && <ProgressBar value={stageProgress} label={stageLabel} />}
 
       {shouldWarnBeforeClose && (
         <p className="message message--warning transfer-alert">Do not close this tab while the transfer is active.</p>
       )}
-      {status === 'waiting' && !pendingReceiver && (
-        <p className="message">Waiting for receiver connection request...</p>
+      {status === 'connected' && !receiverReady && (
+        <p className="message">Receiver approved. Waiting for them to press Receive file.</p>
       )}
-      {status === 'connected' && progress < 90 && <p className="message message--success">Receiver connected. Press Send.</p>}
+      {status === 'connected' && receiverReady && progress < 90 && (
+        <p className="message message--success">Receiver is ready. Press Send now.</p>
+      )}
+      {status === 'connected' && receiverReady && !file && (
+        <p className="message message--error transfer-alert transfer-alert--error">
+          Choose a file on the sender page. Send stays locked until a file is selected.
+        </p>
+      )}
       {status === 'connected' && progress >= 90 && (
         <p className="message message--success">Upload sent. Waiting for receiver to finish download.</p>
       )}

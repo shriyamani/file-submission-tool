@@ -1,33 +1,115 @@
 import { useEffect, useState } from 'react'
 import ReceiverView from './views/ReceiverView'
 import SenderView from './views/SenderView'
-import { generateECDHKeyPair } from './utils/crypto'
 import './App.css'
 
-type InfoPage = 'transfer' | 'how' | 'security' | 'faq'
+type InfoPage = 'transfer' | 'how' | 'privacy' | 'faq'
 type Theme = 'light' | 'dark'
 
+interface JourneyItem {
+  label: string
+  title: string
+  description: string
+}
+
 const THEME_STORAGE_KEY = 'beam-theme'
+
+const HOW_STEPS: JourneyItem[] = [
+  {
+    label: 'STEP 01',
+    title: 'Sender uploads the file',
+    description:
+      'The sender opens Beam, clicks the drop zone, and chooses the document to share.',
+  },
+  {
+    label: 'STEP 02',
+    title: 'Generate the share link',
+    description:
+      'The sender presses Generate share link. Beam creates a fresh session URL for that transfer.',
+  },
+  {
+    label: 'STEP 03',
+    title: 'Receiver opens the link and connects',
+    description:
+      'The sender shares that link by text or email. The receiver opens it and clicks Connect so the sender gets the access request.',
+  },
+  {
+    label: 'STEP 04',
+    title: 'Receiver confirms they want the file',
+    description:
+      'The receiver clicks Receive file. That confirms they are ready before the sender starts sending anything.',
+  },
+  {
+    label: 'STEP 05',
+    title: 'Sender presses Send',
+    description:
+      'The sender clicks Send. The transfer starts and both screens should show live progress updates.',
+  },
+  {
+    label: 'STEP 06',
+    title: 'Receiver saves the file',
+    description:
+      'When the file arrives, the receiver clicks Save file to download it locally. Success means both screens show completion and confetti.',
+  },
+]
+
+const PRIVACY_ITEMS: JourneyItem[] = [
+  {
+    label: 'SAFETY 01',
+    title: 'Sender approval comes first',
+    description:
+      'A receiver cannot continue just by opening a link. The sender must approve that specific connection request before the session can move forward.',
+  },
+  {
+    label: 'SAFETY 02',
+    title: 'Receiver consent stays explicit',
+    description:
+      'The receiver actively clicks Connect and then Receive file, so the handoff stays intentional on both sides instead of happening silently.',
+  },
+  {
+    label: 'SAFETY 03',
+    title: 'Each transfer gets its own session',
+    description:
+      'Beam creates a fresh session link for each handoff and uses a per-session key exchange before file data starts moving.',
+  },
+  {
+    label: 'SAFETY 04',
+    title: 'Privacy depends on link handling too',
+    description:
+      'Treat the Beam link like an invite. Send it only to the intended receiver and use a trusted channel such as direct text or email.',
+  },
+]
+
 const FAQ_ITEMS = [
   {
-    question: 'How does Beam address Menlo Report ethics concerns?',
+    question: 'What is the easiest way to test Beam the first time?',
     answer:
-      'Beam balances privacy with harm reduction through interface design. It provides user guidance, consent checkpoints, and clear transfer context instead of broad server-side surveillance.',
+      'Keep both Beam pages on the transfer view and leave the sender tab open from link generation through final download.',
   },
   {
-    question: 'How does Beam support Respect for Law and Public Interest?',
+    question: 'Why do both the sender and receiver have to click buttons?',
     answer:
-      'Beam includes visible usage guidance that reminds users not to share illegal or harmful content and to use the platform responsibly.',
+      'Beam is built as a consent-based handoff. The sender approves who can connect, and the receiver confirms they are ready before the file is sent.',
   },
   {
-    question: 'How does Beam support Beneficence?',
+    question: 'What if the receiver clicks Connect and nothing happens?',
     answer:
-      'Receivers can review file name, size, and type before they accept a transfer. The app also encourages users to share links only through trusted communication channels.',
+      'Check with the sender first. The sender still has to approve that request. If the request is stale, generate a fresh link and try again.',
   },
   {
-    question: 'How does Beam respond to Justice concerns?',
+    question: 'What if Receive file is clicked but the transfer does not start?',
     answer:
-      'Because receivers face higher risk than senders, Beam adds a confirmation prompt before file receipt so the receiver keeps control over whether to continue.',
+      'That usually means the sender has not pressed Send yet, or one of the transfer tabs was refreshed or closed. Keep both pages open and retry in order.',
+  },
+  {
+    question: 'Should I reuse an old Beam link?',
+    answer:
+      'No. The safer workflow is to generate a fresh link for each transfer so each handoff starts with a clean session.',
+  },
+  {
+    question: 'Does Beam act like a public file page?',
+    answer:
+      'No. Beam is designed around a direct sender-to-receiver handoff with approval and receiver confirmation, not a public browsing page for uploaded files.',
   },
 ]
 
@@ -71,6 +153,48 @@ const readInitialTheme = (): Theme => {
   return 'light'
 }
 
+const SunIcon = () => {
+  return (
+    <svg
+      className="theme-toggle__icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="4.2" />
+      <path d="M12 2.5v2.7" />
+      <path d="M12 18.8v2.7" />
+      <path d="M2.5 12h2.7" />
+      <path d="M18.8 12h2.7" />
+      <path d="M5.3 5.3l1.9 1.9" />
+      <path d="M16.8 16.8l1.9 1.9" />
+      <path d="M5.3 18.7l1.9-1.9" />
+      <path d="M16.8 7.2l1.9-1.9" />
+    </svg>
+  )
+}
+
+const MoonIcon = () => {
+  return (
+    <svg
+      className="theme-toggle__icon"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M20 14.3A8 8 0 1 1 9.7 4 6.7 6.7 0 0 0 20 14.3Z" />
+    </svg>
+  )
+}
+
 const App = () => {
   const [sessionId, setSessionId] = useState<string | null>(() => {
     return readSessionIdFromLocation()
@@ -79,13 +203,7 @@ const App = () => {
   const [theme, setTheme] = useState<Theme>(() => {
     return readInitialTheme()
   })
-  const [keysGenerated, setKeysGenerated] = useState(false)
-
-  const handleGenerateKeys = async () => {
-    const keys = await generateECDHKeyPair()
-    console.log('Generated Keys:', keys)
-    setKeysGenerated(true)
-  }
+  const [openFaqIndex, setOpenFaqIndex] = useState<number | null>(0)
 
   useEffect(() => {
     const syncFromUrl = (): void => {
@@ -111,76 +229,91 @@ const App = () => {
     }
   }, [theme])
 
+  const renderJourney = (items: JourneyItem[], showArrows: boolean) => {
+    return (
+      <div className="journey-stack">
+        {items.map((item, index) => {
+          const isLast = index === items.length - 1
+
+          return (
+            <div className="journey-segment" key={item.label}>
+              <article className="journey-card">
+                <div className="journey-card__top">
+                  <span className="journey-chip">{item.label}</span>
+                  <span className="journey-dot" aria-hidden />
+                </div>
+                <h3>{item.title}</h3>
+                <p>{item.description}</p>
+              </article>
+              {showArrows && !isLast && (
+                <div className="journey-arrow" aria-hidden>
+                  <span>&darr;</span>
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    )
+  }
+
   const renderInfoPanel = () => {
     if (activePage === 'how') {
       return (
-        <section className="beam-card beam-card--info">
-          <h2>How it works</h2>
-          <ol className="info-list">
-            <li>
-              <strong>Sender chooses a file and creates a share link.</strong>
-              <span>
-                The app creates a temporary session ID and adds it to the URL so a receiver can join the same session.
-              </span>
-            </li>
-            <li>
-              <strong>Receiver opens the link and requests access.</strong>
-              <span>
-                Sender must approve the request first, so only the intended receiver can continue.
-              </span>
-            </li>
-            <li>
-              <strong>Receiver presses Receive file, then Sender presses Send.</strong>
-              <span>
-                Transfer progress updates in both tabs, then the receiver gets a local Save file button.
-              </span>
-            </li>
-            <li>
-              <strong>The received file never uploads to a permanent cloud store in this demo.</strong>
-              <span>
-                This build keeps data in-browser for session simulation while full networking integration is in progress.
-              </span>
-            </li>
-          </ol>
-          <p className="info-note">
-            Current dev status: transport is mocked, so cross-device reliability depends on the networking layer that is
-            still being integrated.
-          </p>
+        <section className="beam-card beam-card--info-panel">
+          <header className="info-section-header">
+            <h2>How it works</h2>
+            <p>Beam works best as a clean handoff: upload first, connect second, receive third, send fourth, save last.</p>
+          </header>
+          {renderJourney(HOW_STEPS, true)}
         </section>
       )
     }
 
-    if (activePage === 'security') {
+    if (activePage === 'privacy') {
       return (
-        <section className="beam-card beam-card--placeholder">
-          <h2>Security</h2>
-          <p>Security details are still being documented. For now you can generate a sample key pair below.</p>
-          <div style={{ marginTop: '20px' }}>
-            <button onClick={handleGenerateKeys} className="beam-tab beam-tab--active">
-              {keysGenerated ? 'Keys Generated (Check the Console)' : 'Generate Security Keys'}
-            </button>
-          </div>
+        <section className="beam-card beam-card--info-panel">
+          <header className="info-section-header">
+            <h2>Privacy &amp; Security</h2>
+            <p>The goal is simple: keep control with the sender, keep consent with the receiver, and keep the link private.</p>
+          </header>
+          {renderJourney(PRIVACY_ITEMS, true)}
         </section>
       )
     }
 
     return (
-      <section className="beam-card beam-card--info">
-        <h2>FAQ</h2>
-        <div className="faq-list">
+      <section className="beam-card beam-card--info-panel">
+        <header className="info-section-header">
+          <h2>FAQ</h2>
+          <p>Quick answers for the questions people usually ask before they send the link.</p>
+        </header>
+        <div className="faq-stack">
           {FAQ_ITEMS.map((item, index) => {
+            const isOpen = openFaqIndex === index
+
             return (
-              <details className="faq-item" key={item.question} open={index === 0}>
-                <summary className="faq-question">{item.question}</summary>
-                <p>{item.answer}</p>
-              </details>
+              <article className={`faq-entry${isOpen ? ' faq-entry--open' : ''}`} key={item.question}>
+                <button
+                  className="faq-entry__button"
+                  type="button"
+                  aria-expanded={isOpen}
+                  onClick={() => {
+                    setOpenFaqIndex((currentIndex) => {
+                      return currentIndex === index ? null : index
+                    })
+                  }}
+                >
+                  <span>{item.question}</span>
+                  <span className="faq-entry__icon" aria-hidden>
+                    {isOpen ? '-' : '+'}
+                  </span>
+                </button>
+                {isOpen && <p className="faq-entry__answer">{item.answer}</p>}
+              </article>
             )
           })}
         </div>
-        <p className="info-note">
-          Beam intentionally minimizes centralized oversight to preserve privacy, while these design choices provide
-          practical safeguards for safer use.
-        </p>
       </section>
     )
   }
@@ -213,13 +346,13 @@ const App = () => {
                 How it works
               </button>
               <button
-                className={`beam-tab${activePage === 'security' ? ' beam-tab--active' : ''}`}
+                className={`beam-tab${activePage === 'privacy' ? ' beam-tab--active' : ''}`}
                 type="button"
                 onClick={() => {
-                  setActivePage('security')
+                  setActivePage('privacy')
                 }}
               >
-                Security
+                Privacy &amp; Security
               </button>
               <button
                 className={`beam-tab${activePage === 'faq' ? ' beam-tab--active' : ''}`}
@@ -232,22 +365,30 @@ const App = () => {
               </button>
             </nav>
             <div className="topbar-right">
-              <button
-                className={`theme-slider${theme === 'dark' ? ' theme-slider--dark' : ''}`}
-                type="button"
-                role="switch"
-                aria-checked={theme === 'dark'}
-                aria-label="Toggle dark mode"
-                onClick={() => {
-                  setTheme((currentTheme) => {
-                    return currentTheme === 'light' ? 'dark' : 'light'
-                  })
-                }}
-              >
-                <span className="theme-slider__label theme-slider__label--light">Light</span>
-                <span className="theme-slider__label theme-slider__label--dark">Dark</span>
-                <span className="theme-slider__thumb" aria-hidden />
-              </button>
+              <div className="theme-toggle" role="group" aria-label="Theme">
+                <button
+                  className={`theme-toggle__button${theme === 'light' ? ' theme-toggle__button--active' : ''}`}
+                  type="button"
+                  aria-pressed={theme === 'light'}
+                  aria-label="Use light mode"
+                  onClick={() => {
+                    setTheme('light')
+                  }}
+                >
+                  <SunIcon />
+                </button>
+                <button
+                  className={`theme-toggle__button${theme === 'dark' ? ' theme-toggle__button--active' : ''}`}
+                  type="button"
+                  aria-pressed={theme === 'dark'}
+                  aria-label="Use dark mode"
+                  onClick={() => {
+                    setTheme('dark')
+                  }}
+                >
+                  <MoonIcon />
+                </button>
+              </div>
               <div className="mode-badge">{sessionId ? 'Receiver mode' : 'Sender mode'}</div>
             </div>
           </header>
