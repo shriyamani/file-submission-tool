@@ -572,6 +572,8 @@
   font-weight: 700;
   cursor: pointer;
   text-decoration: none;
+  white-space: normal;
+  text-align: center;
 }
 
 .btn:not(:disabled):hover {
@@ -622,6 +624,7 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 8px;
   font-size: 0.82rem;
 }
@@ -644,6 +647,8 @@
   color: var(--message-warning);
   font-size: 0.82rem;
   line-height: 1.6;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
 
 .request-alert-chip {
@@ -656,6 +661,8 @@
   color: var(--message-warning);
   background: rgba(255, 255, 255, 0.28);
   border: 1px solid var(--warning-border);
+  white-space: normal;
+  text-align: left;
 }
 
 .request-modal-backdrop {
@@ -670,7 +677,11 @@
 }
 
 .request-modal {
-  width: min(480px, 100%);
+  width: auto;
+  max-width: min(480px, calc(100vw - 48px));
+  max-height: 90vh;
+  margin: 16px;
+  overflow-y: auto;
   border-radius: 18px;
   border: 1px solid var(--warning-border);
   background: var(--warning-bg);
@@ -754,6 +765,7 @@
   display: block;
   color: var(--text);
   font-size: 0.9rem;
+  overflow-wrap: break-word;
 }
 
 .download-box span {
@@ -960,6 +972,8 @@
     justify-content: center;
     text-align: center;
     width: 100%;
+    padding: 7px 10px;
+    font-size: 0.72rem;
   }
 
   .theme-toggle {
@@ -1025,12 +1039,33 @@
   }
 
   .topbar-right {
-    flex-direction: column;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px;
     align-items: stretch;
+  }
+
+  .theme-toggle {
+    padding: 2px;
+  }
+
+  .theme-toggle__button {
+    width: 26px;
+    height: 26px;
+  }
+
+  .mode-badge {
+    padding: 0 10px;
+    height: 32px;
   }
 
   .action-row {
     flex-direction: column;
+    align-items: stretch;
+  }
+  
+  .request-modal-backdrop {
+    padding: 8px;
   }
 
   .action-row .btn {
@@ -1046,17 +1081,45 @@
   }
 
   .request-modal {
-    width: min(96vw, 420px);
+    max-width: calc(100vw - 32px);
+    margin: 16px;
   }
 
   .session-box,
-  .download-box {
+  .download-box,
+  .request-head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .request-head {
+    gap: 10px;
+  }
+
+  .request-head strong {
+    width: 100%;
+    overflow-wrap: break-word;
   }
 
   .download-box .btn {
     width: 100%;
     text-align: center;
+  }
+
+  .beam-wordmark {
+    font-size: clamp(1.8rem, 10vw, 2.4rem);
+    letter-spacing: 0.12em;
+  }
+
+  .beam-hero h1 {
+    font-size: clamp(1.4rem, 6vw, 1.8rem);
+  }
+
+  .beam-hero {
+    margin-bottom: 0;
+  }
+
+  .beam-panel {
+    margin-top: 16px;
   }
 }
