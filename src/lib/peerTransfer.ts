@@ -695,8 +695,11 @@ export const receiveFile = async (
             nextExpectedIndex += 1
           }
 
-          if (receivedChunksCount !== raw.total) {
-            reject(new Error(`Expected ${raw.total} chunks but received ${receivedChunksCount}.`))
+          const expectedChunks =
+            totalChunksFromSender > 0 ? totalChunksFromSender : Math.ceil(raw.fileSize / CHUNK_SIZE)
+
+          if (receivedChunksCount !== expectedChunks) {
+            reject(new Error(`Expected ${expectedChunks} chunks but received ${receivedChunksCount}.`))
             return
           }
 
