@@ -158,6 +158,7 @@ let onReceiverCompleteCallback: (() => void) | null = null
 let onChunkAckCallback: ((msg: ChunkAckMessage) => void) | null = null
 let cachedReceiverPubKey: PubKeyMessage | null = null
 let cachedReceiverReady = false
+let cachedReceiverAckCount = 0
 let senderCleanupTimeoutId: number | null = null
 
 const cleanupSenderConnection = (): void => {
@@ -167,6 +168,7 @@ const cleanupSenderConnection = (): void => {
   }
 
   cachedReceiverReady = false
+  cachedReceiverAckCount = 0
   onReceiverReadyCallback = null
   onReceiverCompleteCallback = null
   onChunkAckCallback = null
@@ -258,6 +260,7 @@ export const initSenderPeer = (
             onReceiverCompleteCallback()
           }
         } else if (isChunkAckMessage(raw)) {
+          cachedReceiverAckCount = Math.max(cachedReceiverAckCount, raw.receivedChunks)
           if (onChunkAckCallback) {
             onChunkAckCallback(raw)
           }
@@ -535,9 +538,12 @@ export const sendFile = async (
   const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
   let offset = 0
   let chunkIndex = 0
+  cachedReceiverAckCount = 0
   let ackedChunks = 0
 
   const waitForAck = (targetReceivedChunks: number): Promise<void> => {
+    ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount)
+
     if (ackedChunks >= targetReceivedChunks) {
       return Promise.resolve()
     }
@@ -551,7 +557,7 @@ export const sendFile = async (
       }, CHUNK_ACK_TIMEOUT_MS)
 
       const handleAck = (msg: ChunkAckMessage): void => {
-        ackedChunks = Math.max(ackedChunks, msg.receivedChunks)
+        ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount, msg.receivedChunks)
         if (ackedChunks >= targetReceivedChunks) {
           window.clearTimeout(timeoutId)
           if (onChunkAckCallback === handleAck) {
@@ -562,6 +568,16 @@ export const sendFile = async (
       }
 
       onChunkAckCallback = handleAck
+
+      // If an ack arrived between the first pre-check and callback registration, resolve now.
+      ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount)
+      if (ackedChunks >= targetReceivedChunks) {
+        window.clearTimeout(timeoutId)
+        if (onChunkAckCallback === handleAck) {
+          onChunkAckCallback = null
+        }
+        resolve()
+      }
     })
   }
 
