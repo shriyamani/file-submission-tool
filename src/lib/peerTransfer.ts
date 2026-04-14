@@ -40,29 +40,29 @@ const CHUNK_ACK_TIMEOUT_MS = 30_000
 const PEER_CONFIG = {
   config: {
     iceServers: [
-      {
-        urls: 'stun:stun.relay.metered.ca:80',
-      },
-      {
-        urls: 'turn:global.relay.metered.ca:80',
-        username: 'e6a6ef99abba0455118bdf45',
-        credential: 'JTR4jUC/RBCd6Ed3',
-      },
-      {
-        urls: 'turn:global.relay.metered.ca:80?transport=tcp',
-        username: 'e6a6ef99abba0455118bdf45',
-        credential: 'JTR4jUC/RBCd6Ed3',
-      },
-      {
-        urls: 'turn:global.relay.metered.ca:443',
-        username: 'e6a6ef99abba0455118bdf45',
-        credential: 'JTR4jUC/RBCd6Ed3',
-      },
-      {
-        urls: 'turns:global.relay.metered.ca:443?transport=tcp',
-        username: 'e6a6ef99abba0455118bdf45',
-        credential: 'JTR4jUC/RBCd6Ed3',
-      },
+        {
+          urls: "stun:stun.relay.metered.ca:80",
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80",
+          username: "0d640f5263b6efa7733ab8b9",
+          credential: "g483+HWhRyoqnl9+",
+        },
+        {
+          urls: "turn:global.relay.metered.ca:80?transport=tcp",
+          username: "0d640f5263b6efa7733ab8b9",
+          credential: "g483+HWhRyoqnl9+",
+        },
+        {
+          urls: "turn:global.relay.metered.ca:443",
+          username: "0d640f5263b6efa7733ab8b9",
+          credential: "g483+HWhRyoqnl9+",
+        },
+        {
+          urls: "turns:global.relay.metered.ca:443?transport=tcp",
+          username: "0d640f5263b6efa7733ab8b9",
+          credential: "g483+HWhRyoqnl9+",
+        },
     ],
   },
 }
