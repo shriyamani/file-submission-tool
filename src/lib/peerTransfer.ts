@@ -24,7 +24,18 @@ export {
 // const STORAGE_KEY_PREFIX = 'beam-mock-session:'
 // const PUBKEY_POLL_INTERVAL_MS = 200
 const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
-const CHUNK_SIZE = 64 * 1024 // 64KB
+const CHUNK_SIZE = 16 * 1024
+const LARGE_FILE_CHUNK_SIZE = 64 * 1024
+const LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024
+const HUGE_FILE_CHUNK_SIZE = 128 * 1024
+const HUGE_FILE_THRESHOLD_BYTES = 500 * 1024 * 1024
+const ACK_EVERY_CHUNKS = 8
+const ACK_EVERY_CHUNKS_LARGE_FILE = 32
+const ACK_EVERY_CHUNKS_HUGE_FILE = 64
+const MAX_IN_FLIGHT_CHUNKS = 64
+const MAX_IN_FLIGHT_CHUNKS_LARGE_FILE = 256
+const MAX_IN_FLIGHT_CHUNKS_HUGE_FILE = 512
+const CHUNK_ACK_TIMEOUT_MS = 30_000
 
 const PEER_CONFIG = {
   config: {
@@ -92,6 +103,11 @@ interface ReceiverCompleteMessage {
   type: 'receiver-complete'
 }
 
+interface ChunkAckMessage {
+  type: 'chunk-ack'
+  receivedChunks: number
+}
+
 interface PubKeyMessage {
   type: 'pubkey'
   role: PeerRole
@@ -106,6 +122,7 @@ type PeerMessage =
   | DoneSignal
   | ReceiverReadyMessage
   | ReceiverCompleteMessage
+  | ChunkAckMessage
   | PubKeyMessage
 
 const isRequestMessage = (msg: unknown): msg is RequestMessage =>
@@ -129,6 +146,9 @@ const isReceiverReadyMessage = (msg: unknown): msg is ReceiverReadyMessage =>
 const isReceiverCompleteMessage = (msg: unknown): msg is ReceiverCompleteMessage =>
   typeof msg === 'object' && msg !== null && (msg as ReceiverCompleteMessage).type === 'receiver-complete'
 
+const isChunkAckMessage = (msg: unknown): msg is ChunkAckMessage =>
+  typeof msg === 'object' && msg !== null && (msg as ChunkAckMessage).type === 'chunk-ack'
+
 const isPubKeyMessage = (msg: unknown): msg is PubKeyMessage =>
   typeof msg === 'object' && msg !== null && (msg as PubKeyMessage).type === 'pubkey'
 
@@ -143,8 +163,10 @@ let onApprovalCallback: ((msg: ApprovedMessage | RejectedMessage) => void) | nul
 let onFileDataCallback: ((msg: ChunkEnvelope | DoneSignal) => void) | null = null
 let onReceiverReadyCallback: (() => void) | null = null
 let onReceiverCompleteCallback: (() => void) | null = null
+let onChunkAckCallback: ((msg: ChunkAckMessage) => void) | null = null
 let cachedReceiverPubKey: PubKeyMessage | null = null
 let cachedReceiverReady = false
+let cachedReceiverAckCount = 0
 let senderCleanupTimeoutId: number | null = null
 
 const cleanupSenderConnection = (): void => {
@@ -154,8 +176,10 @@ const cleanupSenderConnection = (): void => {
   }
 
   cachedReceiverReady = false
+  cachedReceiverAckCount = 0
   onReceiverReadyCallback = null
   onReceiverCompleteCallback = null
+  onChunkAckCallback = null
   senderDataConn?.close()
   senderPeer?.destroy()
   senderPeer = null
@@ -242,6 +266,11 @@ export const initSenderPeer = (
         } else if (isReceiverCompleteMessage(raw)) {
           if (onReceiverCompleteCallback) {
             onReceiverCompleteCallback()
+          }
+        } else if (isChunkAckMessage(raw)) {
+          cachedReceiverAckCount = Math.max(cachedReceiverAckCount, raw.receivedChunks)
+          if (onChunkAckCallback) {
+            onChunkAckCallback(raw)
           }
         } else if (isPubKeyMessage(raw)) {
           if (onPubKeyCallback) {
@@ -514,14 +543,79 @@ export const sendFile = async (
     throw new Error('No active PeerJS data connection.')
   }
 
-  const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+  const useHugeFileProfile = file.size >= HUGE_FILE_THRESHOLD_BYTES
+  const useLargeFileProfile = file.size >= LARGE_FILE_THRESHOLD_BYTES
+
+  const chunkSize = useHugeFileProfile
+    ? HUGE_FILE_CHUNK_SIZE
+    : useLargeFileProfile
+      ? LARGE_FILE_CHUNK_SIZE
+      : CHUNK_SIZE
+
+  const ackEveryChunks = useHugeFileProfile
+    ? ACK_EVERY_CHUNKS_HUGE_FILE
+    : useLargeFileProfile
+      ? ACK_EVERY_CHUNKS_LARGE_FILE
+      : ACK_EVERY_CHUNKS
+
+  const maxInFlightChunks = useHugeFileProfile
+    ? MAX_IN_FLIGHT_CHUNKS_HUGE_FILE
+    : useLargeFileProfile
+      ? MAX_IN_FLIGHT_CHUNKS_LARGE_FILE
+      : MAX_IN_FLIGHT_CHUNKS
+
+  const totalChunks = Math.ceil(file.size / chunkSize)
   let offset = 0
   let chunkIndex = 0
+  cachedReceiverAckCount = 0
+  let ackedChunks = 0
+  let lastProgress = -1
+
+  const waitForAck = (targetReceivedChunks: number): Promise<void> => {
+    ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount)
+
+    if (ackedChunks >= targetReceivedChunks) {
+      return Promise.resolve()
+    }
+
+    return new Promise((resolve, reject) => {
+      const timeoutId = window.setTimeout(() => {
+        if (onChunkAckCallback === handleAck) {
+          onChunkAckCallback = null
+        }
+        reject(new Error('Timed out waiting for receiver chunk acknowledgement.'))
+      }, CHUNK_ACK_TIMEOUT_MS)
+
+      const handleAck = (msg: ChunkAckMessage): void => {
+        ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount, msg.receivedChunks)
+        if (ackedChunks >= targetReceivedChunks) {
+          window.clearTimeout(timeoutId)
+          if (onChunkAckCallback === handleAck) {
+            onChunkAckCallback = null
+          }
+          resolve()
+        }
+      }
+
+      onChunkAckCallback = handleAck
+
+      // If an ack arrived between the first pre-check and callback registration, resolve now.
+      ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount)
+      if (ackedChunks >= targetReceivedChunks) {
+        window.clearTimeout(timeoutId)
+        if (onChunkAckCallback === handleAck) {
+          onChunkAckCallback = null
+        }
+        resolve()
+      }
+    })
+  }
 
   onProgress(0)
+  lastProgress = 0
 
   while (offset < file.size) {
-    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE)
+    const chunkBlob = file.slice(offset, offset + chunkSize)
     const chunkBuffer = await chunkBlob.arrayBuffer()
 
     const encryptedBuffer = await secureEncryptChunk(chunkBuffer, sessionKey)
@@ -534,11 +628,25 @@ export const sendFile = async (
     }
     senderDataConn.send(envelope)
 
-    offset += CHUNK_SIZE
+    offset += chunkSize
     chunkIndex++
-    onProgress(Math.round((chunkIndex / totalChunks) * 100))
-    await delay(10)
+    const nextProgress = Math.round((chunkIndex / totalChunks) * 100)
+    if (nextProgress !== lastProgress) {
+      onProgress(nextProgress)
+      lastProgress = nextProgress
+    }
+
+    if (chunkIndex % ackEveryChunks === 0) {
+      await waitForAck(chunkIndex)
+    }
+
+    if (chunkIndex - ackedChunks >= maxInFlightChunks) {
+      await waitForAck(chunkIndex - maxInFlightChunks + 1)
+    }
   }
+
+  await waitForAck(totalChunks)
+  onChunkAckCallback = null
 
   const doneSignal: DoneSignal = {
     type: 'done',
@@ -582,9 +690,41 @@ export const receiveFile = async (
   }
 
   return new Promise((resolve, reject) => {
-    const receivedChunks = new Map<number, ArrayBuffer>()
+    const decryptedBlobs: Blob[] = []
+    const outOfOrderChunks = new Map<number, ArrayBuffer>()
+    let nextExpectedIndex = 0
+    let receivedChunksCount = 0
+    let totalChunksFromSender = 0
+    let lastProgress = 2
     let fileMeta: DoneSignal | null = null
     const sessionKeyPromise = Promise.resolve(sessionKey)
+
+    const processChunk = async (encryptedChunk: ArrayBuffer): Promise<void> => {
+      const resolvedSessionKey = await sessionKeyPromise
+      if (!resolvedSessionKey) {
+        throw new Error('Failed to derive session key.')
+      }
+
+      const decryptedBuffer = await secureDecryptChunk(encryptedChunk, resolvedSessionKey)
+      decryptedBlobs.push(new Blob([decryptedBuffer]))
+      receivedChunksCount += 1
+
+      if (receiverDataConn) {
+        const ack: ChunkAckMessage = {
+          type: 'chunk-ack',
+          receivedChunks: receivedChunksCount,
+        }
+        receiverDataConn.send(ack)
+      }
+
+      if (totalChunksFromSender > 0) {
+        const nextProgress = Math.round((receivedChunksCount / totalChunksFromSender) * 100)
+        if (nextProgress !== lastProgress) {
+          onProgress(nextProgress)
+          lastProgress = nextProgress
+        }
+      }
+    }
 
     sessionKeyPromise.catch((error) => {
       onFileDataCallback = null
@@ -598,26 +738,26 @@ export const receiveFile = async (
         if (isDoneSignal(raw)) {
           fileMeta = raw
           onFileDataCallback = null
-          const totalChunks = receivedChunks.size
-          const decryptedBlobs: Blob[] = []
-          const resolvedSessionKey = await sessionKeyPromise
+          while (outOfOrderChunks.has(nextExpectedIndex)) {
+            const bufferedChunk = outOfOrderChunks.get(nextExpectedIndex)
+            outOfOrderChunks.delete(nextExpectedIndex)
+            if (!bufferedChunk) {
+              reject(new Error(`Missing buffered chunk at index ${nextExpectedIndex}`))
+              return
+            }
+            await processChunk(bufferedChunk)
+            nextExpectedIndex += 1
+          }
 
-          if (!resolvedSessionKey) {
-            reject(new Error('Failed to derive session key.'))
+          const expectedChunks =
+            totalChunksFromSender > 0 ? totalChunksFromSender : Math.ceil(raw.fileSize / CHUNK_SIZE)
+
+          if (receivedChunksCount !== expectedChunks) {
+            reject(new Error(`Expected ${expectedChunks} chunks but received ${receivedChunksCount}.`))
             return
           }
 
-          for (let i = 0; i < totalChunks; i++) {
-            const encryptedChunk = receivedChunks.get(i)
-            if (!encryptedChunk) {
-              reject(new Error(`Missing chunk at index ${i}`))
-              return
-            }
-            const decryptedBuffer = await secureDecryptChunk(encryptedChunk, resolvedSessionKey)
-            decryptedBlobs.push(new Blob([decryptedBuffer]))
-          }
-
-          console.log(`Decrypted ${totalChunks} chunks successfully`)
+          console.log(`Decrypted ${receivedChunksCount} chunks successfully`)
 
           const finalBlob = new Blob(decryptedBlobs, { type: fileMeta.fileType })
 
@@ -636,8 +776,29 @@ export const receiveFile = async (
           })
 
         } else if (isChunkEnvelope(raw)) {
-          receivedChunks.set(raw.index, raw.data)
-          onProgress(Math.round((receivedChunks.size / raw.total) * 100))
+          totalChunksFromSender = raw.total
+
+          if (raw.index < nextExpectedIndex) {
+            return
+          }
+
+          if (raw.index === nextExpectedIndex) {
+            await processChunk(raw.data)
+            nextExpectedIndex += 1
+
+            while (outOfOrderChunks.has(nextExpectedIndex)) {
+              const bufferedChunk = outOfOrderChunks.get(nextExpectedIndex)
+              outOfOrderChunks.delete(nextExpectedIndex)
+              if (!bufferedChunk) {
+                reject(new Error(`Missing buffered chunk at index ${nextExpectedIndex}`))
+                return
+              }
+              await processChunk(bufferedChunk)
+              nextExpectedIndex += 1
+            }
+          } else {
+            outOfOrderChunks.set(raw.index, raw.data)
+          }
         }
       } catch (err) {
         onFileDataCallback = null
