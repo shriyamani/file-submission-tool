@@ -27,10 +27,14 @@ const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
 const CHUNK_SIZE = 16 * 1024
 const LARGE_FILE_CHUNK_SIZE = 64 * 1024
 const LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024
+const HUGE_FILE_CHUNK_SIZE = 128 * 1024
+const HUGE_FILE_THRESHOLD_BYTES = 500 * 1024 * 1024
 const ACK_EVERY_CHUNKS = 8
 const ACK_EVERY_CHUNKS_LARGE_FILE = 32
+const ACK_EVERY_CHUNKS_HUGE_FILE = 64
 const MAX_IN_FLIGHT_CHUNKS = 64
 const MAX_IN_FLIGHT_CHUNKS_LARGE_FILE = 256
+const MAX_IN_FLIGHT_CHUNKS_HUGE_FILE = 512
 const CHUNK_ACK_TIMEOUT_MS = 30_000
 
 const PEER_CONFIG = {
@@ -539,18 +543,33 @@ export const sendFile = async (
     throw new Error('No active PeerJS data connection.')
   }
 
+  const useHugeFileProfile = file.size >= HUGE_FILE_THRESHOLD_BYTES
   const useLargeFileProfile = file.size >= LARGE_FILE_THRESHOLD_BYTES
-  const chunkSize = useLargeFileProfile ? LARGE_FILE_CHUNK_SIZE : CHUNK_SIZE
-  const ackEveryChunks = useLargeFileProfile ? ACK_EVERY_CHUNKS_LARGE_FILE : ACK_EVERY_CHUNKS
-  const maxInFlightChunks = useLargeFileProfile
-    ? MAX_IN_FLIGHT_CHUNKS_LARGE_FILE
-    : MAX_IN_FLIGHT_CHUNKS
+
+  const chunkSize = useHugeFileProfile
+    ? HUGE_FILE_CHUNK_SIZE
+    : useLargeFileProfile
+      ? LARGE_FILE_CHUNK_SIZE
+      : CHUNK_SIZE
+
+  const ackEveryChunks = useHugeFileProfile
+    ? ACK_EVERY_CHUNKS_HUGE_FILE
+    : useLargeFileProfile
+      ? ACK_EVERY_CHUNKS_LARGE_FILE
+      : ACK_EVERY_CHUNKS
+
+  const maxInFlightChunks = useHugeFileProfile
+    ? MAX_IN_FLIGHT_CHUNKS_HUGE_FILE
+    : useLargeFileProfile
+      ? MAX_IN_FLIGHT_CHUNKS_LARGE_FILE
+      : MAX_IN_FLIGHT_CHUNKS
 
   const totalChunks = Math.ceil(file.size / chunkSize)
   let offset = 0
   let chunkIndex = 0
   cachedReceiverAckCount = 0
   let ackedChunks = 0
+  let lastProgress = -1
 
   const waitForAck = (targetReceivedChunks: number): Promise<void> => {
     ackedChunks = Math.max(ackedChunks, cachedReceiverAckCount)
@@ -593,6 +612,7 @@ export const sendFile = async (
   }
 
   onProgress(0)
+  lastProgress = 0
 
   while (offset < file.size) {
     const chunkBlob = file.slice(offset, offset + chunkSize)
@@ -610,7 +630,11 @@ export const sendFile = async (
 
     offset += chunkSize
     chunkIndex++
-    onProgress(Math.round((chunkIndex / totalChunks) * 100))
+    const nextProgress = Math.round((chunkIndex / totalChunks) * 100)
+    if (nextProgress !== lastProgress) {
+      onProgress(nextProgress)
+      lastProgress = nextProgress
+    }
 
     if (chunkIndex % ackEveryChunks === 0) {
       await waitForAck(chunkIndex)
@@ -671,6 +695,7 @@ export const receiveFile = async (
     let nextExpectedIndex = 0
     let receivedChunksCount = 0
     let totalChunksFromSender = 0
+    let lastProgress = 2
     let fileMeta: DoneSignal | null = null
     const sessionKeyPromise = Promise.resolve(sessionKey)
 
@@ -693,7 +718,11 @@ export const receiveFile = async (
       }
 
       if (totalChunksFromSender > 0) {
-        onProgress(Math.round((receivedChunksCount / totalChunksFromSender) * 100))
+        const nextProgress = Math.round((receivedChunksCount / totalChunksFromSender) * 100)
+        if (nextProgress !== lastProgress) {
+          onProgress(nextProgress)
+          lastProgress = nextProgress
+        }
       }
     }
 
