@@ -24,9 +24,13 @@ export {
 // const STORAGE_KEY_PREFIX = 'beam-mock-session:'
 // const PUBKEY_POLL_INTERVAL_MS = 200
 const PUBKEY_EXCHANGE_TIMEOUT_MS = 30_000
-const CHUNK_SIZE = 16 * 1024 // 16KB keeps packets under conservative browser data-channel limits
+const CHUNK_SIZE = 16 * 1024
+const LARGE_FILE_CHUNK_SIZE = 64 * 1024
+const LARGE_FILE_THRESHOLD_BYTES = 100 * 1024 * 1024
 const ACK_EVERY_CHUNKS = 8
+const ACK_EVERY_CHUNKS_LARGE_FILE = 32
 const MAX_IN_FLIGHT_CHUNKS = 64
+const MAX_IN_FLIGHT_CHUNKS_LARGE_FILE = 256
 const CHUNK_ACK_TIMEOUT_MS = 30_000
 
 const PEER_CONFIG = {
@@ -535,7 +539,14 @@ export const sendFile = async (
     throw new Error('No active PeerJS data connection.')
   }
 
-  const totalChunks = Math.ceil(file.size / CHUNK_SIZE)
+  const useLargeFileProfile = file.size >= LARGE_FILE_THRESHOLD_BYTES
+  const chunkSize = useLargeFileProfile ? LARGE_FILE_CHUNK_SIZE : CHUNK_SIZE
+  const ackEveryChunks = useLargeFileProfile ? ACK_EVERY_CHUNKS_LARGE_FILE : ACK_EVERY_CHUNKS
+  const maxInFlightChunks = useLargeFileProfile
+    ? MAX_IN_FLIGHT_CHUNKS_LARGE_FILE
+    : MAX_IN_FLIGHT_CHUNKS
+
+  const totalChunks = Math.ceil(file.size / chunkSize)
   let offset = 0
   let chunkIndex = 0
   cachedReceiverAckCount = 0
@@ -584,7 +595,7 @@ export const sendFile = async (
   onProgress(0)
 
   while (offset < file.size) {
-    const chunkBlob = file.slice(offset, offset + CHUNK_SIZE)
+    const chunkBlob = file.slice(offset, offset + chunkSize)
     const chunkBuffer = await chunkBlob.arrayBuffer()
 
     const encryptedBuffer = await secureEncryptChunk(chunkBuffer, sessionKey)
@@ -597,19 +608,17 @@ export const sendFile = async (
     }
     senderDataConn.send(envelope)
 
-    offset += CHUNK_SIZE
+    offset += chunkSize
     chunkIndex++
     onProgress(Math.round((chunkIndex / totalChunks) * 100))
 
-    if (chunkIndex % ACK_EVERY_CHUNKS === 0) {
+    if (chunkIndex % ackEveryChunks === 0) {
       await waitForAck(chunkIndex)
     }
 
-    if (chunkIndex - ackedChunks >= MAX_IN_FLIGHT_CHUNKS) {
-      await waitForAck(chunkIndex - MAX_IN_FLIGHT_CHUNKS + 1)
+    if (chunkIndex - ackedChunks >= maxInFlightChunks) {
+      await waitForAck(chunkIndex - maxInFlightChunks + 1)
     }
-
-    await delay(2)
   }
 
   await waitForAck(totalChunks)
