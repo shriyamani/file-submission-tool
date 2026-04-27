@@ -386,10 +386,10 @@ const SenderView = () => {
       />
 
       <div className="action-row action-row--sender">
-        <button className="btn btn-primary" type="button" onClick={handleCreateSession} disabled={!canGenerate}>
+        <button className="btn btn-secondary" type="button" onClick={handleCreateSession} disabled={!canGenerate}>
           {session ? 'Regenerate link' : 'Generate share link'}
         </button>
-        <button className="btn btn-secondary" type="button" onClick={handleSend} disabled={!canSend}>
+        <button className="btn btn-primary" type="button" onClick={handleSend} disabled={!canSend}>
           Send
         </button>
       </div>

@@ -291,7 +291,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
 
       <div className="action-row">
         <button
-          className="btn btn-primary"
+          className="btn btn-secondary"
           type="button"
           onClick={handleConnect}
           disabled={status === 'waiting' || status === 'transferring'}
@@ -299,7 +299,7 @@ const ReceiverView = ({ sessionId }: ReceiverViewProps) => {
           {status === 'waiting' ? 'Waiting for approval...' : connection ? 'Reconnect' : 'Connect'}
         </button>
         <button
-          className="btn btn-secondary"
+          className="btn btn-primary"
           type="button"
           onClick={handleReceive}
           disabled={!connection || !keyPair || status === 'waiting' || status === 'transferring'}
