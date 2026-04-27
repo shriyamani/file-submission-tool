@@ -190,12 +190,13 @@ const delay = (ms: number): Promise<void> =>
   new Promise((resolve) => window.setTimeout(resolve, ms))
 
 const createRandomId = (): string => {
-  const value = Math.floor(Math.random() * 10 ** 8)
-  return `beam-${value.toString(36)}`
+  return `beam-${window.crypto.randomUUID()}`
 }
 
 const createReceiverLabel = (): string => {
-  const value = Math.floor(1000 + Math.random() * 9000)
+  const array = new Uint16Array(1)
+  window.crypto.getRandomValues(array)
+  const value = 1000 + (array[0] % 9000)
   return `receiver-${value}`
 }
 
